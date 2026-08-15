@@ -3,6 +3,8 @@ package mojaloop
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"testing"
 )
 
@@ -43,6 +45,39 @@ func TestFSPIOPSignatureSupportsApprovedAlgorithms(t *testing.T) {
 	}
 	if _, err := SignRequest("POST", "/transfers", "FMMBE", "PARTNER01", nil, key, "HS256"); err == nil {
 		t.Fatal("unapproved algorithm was accepted")
+	}
+}
+
+func TestFSPIOPSignatureBindsRegisteredKID(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"transferId":"transfer-001"}`)
+	signature, err := SignRequestWithKeyID("POST", "/transfers", "FMMBE", "PARTNER01", body, key, "RS256", "fmmbe-sandbox-2026-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope signatureHeaderValue
+	if err := json.Unmarshal([]byte(signature), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	protectedBytes, err := base64.RawURLEncoding.DecodeString(envelope.ProtectedHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var protected signatureProtectedHeader
+	if err := json.Unmarshal(protectedBytes, &protected); err != nil {
+		t.Fatal(err)
+	}
+	if protected.KeyID != "fmmbe-sandbox-2026-01" {
+		t.Fatalf("protected KID = %q", protected.KeyID)
+	}
+	if err := VerifyRequest("POST", "/transfers", "FMMBE", "PARTNER01", body, signature, &key.PublicKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SignRequestWithKeyID("POST", "/transfers", "FMMBE", "PARTNER01", body, key, "RS256", "bad kid"); err == nil {
+		t.Fatal("noncanonical KID was accepted")
 	}
 }
 

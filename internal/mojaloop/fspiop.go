@@ -24,6 +24,7 @@ var (
 
 type signatureProtectedHeader struct {
 	Alg         string `json:"alg"`
+	KeyID       string `json:"kid,omitempty"`
 	URI         string `json:"FSPIOP-URI"`
 	HTTPMethod  string `json:"FSPIOP-HTTP-Method"`
 	Source      string `json:"FSPIOP-Source"`
@@ -38,10 +39,20 @@ type signatureHeaderValue struct {
 // SignRequest creates the standard Mojaloop FSPIOP-Signature header for a full-body request.
 // The caller must supply the exact path and query string used on the wire.
 func SignRequest(method, uri, source, destination string, body []byte, key *rsa.PrivateKey, algorithm string) (string, error) {
+	return SignRequestWithKeyID(method, uri, source, destination, body, key, algorithm, "")
+}
+
+// SignRequestWithKeyID creates a FSPIOP-Signature header and, when supplied by an approved Hub manifest, binds the registered JOSE KID into the protected header.
+func SignRequestWithKeyID(method, uri, source, destination string, body []byte, key *rsa.PrivateKey, algorithm, keyID string) (string, error) {
 	if key == nil {
 		return "", errors.New("signing key is required")
 	}
-	protected := signatureProtectedHeader{Alg: algorithm, URI: uri, HTTPMethod: strings.ToUpper(method), Source: source, Destination: destination}
+	if keyID != "" {
+		if err := canonicalReference("FSPIOP signing kid", keyID); err != nil {
+			return "", err
+		}
+	}
+	protected := signatureProtectedHeader{Alg: algorithm, KeyID: keyID, URI: uri, HTTPMethod: strings.ToUpper(method), Source: source, Destination: destination}
 	protectedBytes, err := json.Marshal(protected)
 	if err != nil {
 		return "", fmt.Errorf("marshal protected header: %w", err)

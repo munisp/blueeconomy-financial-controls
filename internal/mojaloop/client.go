@@ -17,6 +17,7 @@ type Client struct {
 	Source             string
 	Destination        string
 	SigningKey         *rsa.PrivateKey
+	SigningKeyID       string
 	SignatureAlgorithm string
 }
 
@@ -43,7 +44,7 @@ func (client Client) NewSignedRequest(ctx context.Context, method, path string, 
 		return nil, fmt.Errorf("create Mojaloop request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	signature, err := SignRequest(method, request.URL.RequestURI(), client.Source, client.Destination, body, client.SigningKey, client.SignatureAlgorithm)
+	signature, err := SignRequestWithKeyID(method, request.URL.RequestURI(), client.Source, client.Destination, body, client.SigningKey, client.SignatureAlgorithm, client.SigningKeyID)
 	if err != nil {
 		return nil, err
 	}

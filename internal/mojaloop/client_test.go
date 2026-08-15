@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"net/url"
 	"testing"
 )
@@ -17,7 +19,7 @@ func TestClientBuildsSignedFSPIOPRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := Client{BaseURL: baseURL, Source: "FMMBE", Destination: "PARTNER01", SigningKey: key, SignatureAlgorithm: "RS256"}
+	client := Client{BaseURL: baseURL, Source: "FMMBE", Destination: "PARTNER01", SigningKey: key, SigningKeyID: "fmmbe-sandbox-2026-01", SignatureAlgorithm: "RS256"}
 	body := []byte(`{"transferId":"transfer-001"}`)
 	request, err := client.NewSignedRequest(context.Background(), "POST", "/transfers?mode=universal", body)
 	if err != nil {
@@ -28,6 +30,21 @@ func TestClientBuildsSignedFSPIOPRequest(t *testing.T) {
 	}
 	if err := VerifyRequest(request.Method, request.URL.RequestURI(), "FMMBE", "PARTNER01", body, request.Header.Get(signatureHeader), &key.PublicKey); err != nil {
 		t.Fatal(err)
+	}
+	var envelope signatureHeaderValue
+	if err := json.Unmarshal([]byte(request.Header.Get(signatureHeader)), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	protectedBytes, err := base64.RawURLEncoding.DecodeString(envelope.ProtectedHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var protected signatureProtectedHeader
+	if err := json.Unmarshal(protectedBytes, &protected); err != nil {
+		t.Fatal(err)
+	}
+	if protected.KeyID != client.SigningKeyID {
+		t.Fatalf("protected KID = %q, want %q", protected.KeyID, client.SigningKeyID)
 	}
 }
 
