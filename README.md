@@ -1,22 +1,24 @@
 # Blue Economy Financial Controls
 
-This repository contains the initial financial-control integration boundary for the platform. It uses the **official TigerBeetle Go client** to perform a strictly read-only account lookup against an explicitly configured ledger cluster. It cannot create TigerBeetle accounts, transfers, two-phase transfers, Mojaloop quotes, Mojaloop transfers, participant records or payment instructions.
+This repository contains the real TigerBeetle ledger integration boundary for the platform. It uses the official TigerBeetle Go client and supports explicit account creation plus two-phase pending, post and void transfer operations against an approved configured cluster. It does **not** implement Mojaloop participant integration, payment instructions, settlement, reconciliation with an external payment provider or live-fund authorization.
 
-## Implemented component
+## Commands
 
-`tigerbeetle-verifier` requires all of the following at runtime:
+`tigerbeetle-verifier` performs a redacted account lookup and writes non-secret evidence. It requires `TIGERBEETLE_CLUSTER_ID_HEX`, `TIGERBEETLE_REPLICA_ADDRESSES`, `--account-id-hex` and `--evidence`.
 
-| Input | Purpose |
-|---|---|
-| `TIGERBEETLE_CLUSTER_ID_HEX` | The actual approved TigerBeetle cluster identifier as a hexadecimal Uint128. |
-| `TIGERBEETLE_REPLICA_ADDRESSES` | Comma-separated approved replica addresses for the configured cluster. |
-| `--account-id-hex` | An approved account identifier to look up. |
-| `--evidence` | An approved non-secret evidence-file destination. |
+`tigerbeetle-ledger` performs a real write operation only when an operator supplies an approved TigerBeetle environment and explicit identifiers. It requires `TIGERBEETLE_CLUSTER_ID_HEX`, `TIGERBEETLE_REPLICA_ADDRESSES`, `TIGERBEETLE_LEDGER` and `TIGERBEETLE_CODE`.
 
-The command writes a redacted result that hashes the account reference and records only whether the account was found plus its ledger, code, timestamp and history/closed flags. It does not write credentials, account balances, raw account identifiers or transfers.
+| Operation | Required flags | TigerBeetle operation |
+|---|---|---|
+| `account` | `--id-hex`, optional `--history` | Creates an account idempotently when the existing account has the same immutable attributes. |
+| `reserve` | `--id-hex`, `--debit-account-id-hex`, `--credit-account-id-hex`, `--amount`, `--timeout` | Creates a pending transfer that reserves funds until posted, voided or timed out according to the approved ledger policy. |
+| `post` | `--id-hex`, `--pending-transfer-id-hex` | Posts an existing pending transfer using a distinct transfer identifier. |
+| `void` | `--id-hex`, `--pending-transfer-id-hex` | Voids an existing pending transfer using a distinct transfer identifier. |
+
+The command has no default cluster, replica, ledger, code, account, amount or partner endpoint. It fails when any required environment value or identifier is absent, malformed or outside the TigerBeetle protocol width. Every client result is checked for the official `Created` status; a non-success result exits non-zero.
 
 ## Financial and Mojaloop gate
 
-A compiled TigerBeetle client is **not** a payment-platform implementation. The Ministry must supply and approve the genuine non-production TigerBeetle cluster, account/ledger/code model, participant/settlement design, separation-of-duties controls, reconciliation policy, key/secret delivery, Mojaloop switch/participant endpoint, certificates, test participants, payment rulebook and financial-control sign-off. The verifier must be run against that environment and its evidence reviewed before implementation of any write-capable ledger or Mojaloop payment capability.
+A write-capable TigerBeetle client is **not by itself a payment-platform implementation**. Before any financial flow can be enabled, the Ministry must approve the genuine non-production TigerBeetle cluster, account/ledger/code model, participant and settlement design, separation-of-duties controls, reconciliation policy, key/secret delivery, Mojaloop switch and participant endpoints, certificates, test participants, payment rulebook and financial-control sign-off. The operation must then pass two-phase transfer, duplicate, timeout, post, void, recovery and independent reconciliation tests.
 
-The production implementation will remain disabled until those real dependencies and approvals exist. This repository intentionally contains no placeholder participant, currency, amount, account, transfer, payment or settlement data.
+The repository contains no placeholder participant, currency, amount, account, transfer, payment or settlement data. Production execution remains disabled until the real dependencies, regulated operating approvals and target-environment evidence exist.
