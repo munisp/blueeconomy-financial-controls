@@ -76,6 +76,12 @@ func TestFSPIOPSignatureBindsRegisteredKID(t *testing.T) {
 	if err := VerifyRequest("POST", "/transfers", "FMMBE", "PARTNER01", body, signature, &key.PublicKey); err != nil {
 		t.Fatal(err)
 	}
+	if err := VerifyRequestWithKeyID("POST", "/transfers", "FMMBE", "PARTNER01", body, signature, &key.PublicKey, "fmmbe-sandbox-2026-01"); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRequestWithKeyID("POST", "/transfers", "FMMBE", "PARTNER01", body, signature, &key.PublicKey, "hub-sandbox-2026-02"); err == nil {
+		t.Fatal("mismatched protected KID was accepted")
+	}
 	if _, err := SignRequestWithKeyID("POST", "/transfers", "FMMBE", "PARTNER01", body, key, "RS256", "bad kid"); err == nil {
 		t.Fatal("noncanonical KID was accepted")
 	}

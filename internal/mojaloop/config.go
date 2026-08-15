@@ -18,6 +18,8 @@ type Config struct {
 	Destination                string
 	SigningKeyFile             string
 	SigningKeyID               string
+	VerificationKeyFile        string
+	VerificationKeyID          string
 	SignatureAlgorithm         string
 	CallbackBaseURL            *url.URL
 	CallbackTransferPathPrefix string
@@ -48,6 +50,8 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 		Destination:                getenv("MOJALOOP_FSPIOP_DESTINATION"),
 		SigningKeyFile:             strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
 		SigningKeyID:               getenv("MOJALOOP_SIGNING_KID"),
+		VerificationKeyFile:        strings.TrimSpace(getenv("MOJALOOP_VERIFICATION_KEY_FILE")),
+		VerificationKeyID:          getenv("MOJALOOP_VERIFICATION_KID"),
 		SignatureAlgorithm:         strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
 		CallbackBaseURL:            callbackURL,
 		CallbackTransferPathPrefix: callbackTransferPathPrefix,
@@ -60,6 +64,14 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 		if err := canonicalReference(name, value); err != nil {
 			return Config{}, err
 		}
+	}
+	if config.VerificationKeyID != "" {
+		if err := canonicalReference("MOJALOOP_VERIFICATION_KID", config.VerificationKeyID); err != nil {
+			return Config{}, err
+		}
+	}
+	if (config.VerificationKeyFile == "") != (config.VerificationKeyID == "") {
+		return Config{}, errors.New("MOJALOOP_VERIFICATION_KEY_FILE and MOJALOOP_VERIFICATION_KID must be configured together")
 	}
 	if config.Source == config.Destination {
 		return Config{}, errors.New("MOJALOOP_FSPIOP_SOURCE and MOJALOOP_FSPIOP_DESTINATION must identify distinct participants")

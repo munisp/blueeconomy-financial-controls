@@ -77,8 +77,18 @@ func SignRequestWithKeyID(method, uri, source, destination string, body []byte, 
 
 // VerifyRequest validates the FSPIOP-Signature header, protected HTTP metadata and full request body.
 func VerifyRequest(method, uri, source, destination string, body []byte, headerValue string, key *rsa.PublicKey) error {
+	return VerifyRequestWithKeyID(method, uri, source, destination, body, headerValue, key, "")
+}
+
+// VerifyRequestWithKeyID validates the FSPIOP signature and, when a Hub/participant manifest declares it, requires the signed JOSE KID to match the approved verification-key identity.
+func VerifyRequestWithKeyID(method, uri, source, destination string, body []byte, headerValue string, key *rsa.PublicKey, expectedKeyID string) error {
 	if key == nil {
 		return errors.New("verification key is required")
+	}
+	if expectedKeyID != "" {
+		if err := canonicalReference("FSPIOP verification kid", expectedKeyID); err != nil {
+			return err
+		}
 	}
 	var value signatureHeaderValue
 	if err := json.Unmarshal([]byte(headerValue), &value); err != nil {
@@ -93,6 +103,9 @@ func VerifyRequest(method, uri, source, destination string, body []byte, headerV
 		return fmt.Errorf("decode protected header JSON: %w", err)
 	}
 	if protected.HTTPMethod != strings.ToUpper(method) || protected.URI != uri || protected.Source != source || (destination != "" && protected.Destination != destination) {
+		return ErrInvalidSignature
+	}
+	if expectedKeyID != "" && protected.KeyID != expectedKeyID {
 		return ErrInvalidSignature
 	}
 	cryptoHash, err := signatureHash(protected.Alg)

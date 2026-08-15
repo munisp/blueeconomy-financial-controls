@@ -44,6 +44,17 @@ func run() error {
 	if err := mojaloop.ValidateCABundle(caBundle); err != nil {
 		return err
 	}
+	verificationKey := &privateKey.PublicKey
+	if config.VerificationKeyFile != "" {
+		verificationKeyBytes, readErr := os.ReadFile(config.VerificationKeyFile)
+		if readErr != nil {
+			return fmt.Errorf("read callback verification key: %w", readErr)
+		}
+		verificationKey, readErr = parseRSAPublicKey(verificationKeyBytes)
+		if readErr != nil {
+			return readErr
+		}
+	}
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is required")
@@ -74,7 +85,7 @@ func run() error {
 		return errors.New("MOJALOOP_TLS_CERT_FILE and MOJALOOP_TLS_KEY_FILE are required")
 	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
-	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: &privateKey.PublicKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
+	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
 	mux := http.NewServeMux()
 	mux.Handle(config.CallbackTransferPathPrefix, handler)
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) })
@@ -91,6 +102,32 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("callback verification key is not PEM encoded")
+	}
+	if certificate, err := x509.ParseCertificate(block.Bytes); err == nil {
+		key, ok := certificate.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return nil, errors.New("callback verification certificate is not RSA")
+		}
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS1PublicKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse callback RSA verification key: %w", err)
+	}
+	key, ok := parsed.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("callback verification key is not RSA")
+	}
+	return key, nil
 }
 
 func parseRSAPrivateKey(data []byte) (*rsa.PrivateKey, error) {

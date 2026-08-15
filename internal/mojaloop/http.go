@@ -14,6 +14,7 @@ type CallbackHandler struct {
 	VerificationKey            *rsa.PublicKey
 	ExpectedSource             string
 	ExpectedDestination        string
+	ExpectedVerificationKeyID  string
 	ExpectedTransferPathPrefix string
 }
 
@@ -36,7 +37,7 @@ func (handler CallbackHandler) ServeHTTP(response http.ResponseWriter, request *
 		http.Error(response, "request body unavailable", http.StatusBadRequest)
 		return
 	}
-	if err := VerifyRequest(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey); err != nil {
+	if err := VerifyRequestWithKeyID(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey, handler.ExpectedVerificationKeyID); err != nil {
 		http.Error(response, "invalid FSPIOP signature", http.StatusUnauthorized)
 		return
 	}
