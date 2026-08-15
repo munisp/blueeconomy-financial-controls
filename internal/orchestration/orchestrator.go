@@ -110,3 +110,77 @@ func (orchestrator *Orchestrator) PendingTransferID(intentID string) tigerbeetle
 }
 
 func (orchestrator *Orchestrator) Now() time.Time { return time.Now().UTC() }
+
+func (orchestrator *Orchestrator) PostReserved(ctx context.Context, intentID string) (intent.Intent, error) {
+	current, err := orchestrator.store.Get(ctx, intentID)
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	if current.State == intent.StatePosted {
+		return current, nil
+	}
+	if current.State != intent.StateReserved {
+		return intent.Intent{}, ErrIntentNotReady
+	}
+	pendingID := orchestrator.PendingTransferID(current.IntentID)
+	postID := orchestrator.PostTransferID(current.IntentID)
+	voidID := orchestrator.VoidTransferID(current.IntentID)
+	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransfer(voidID); lookupErr != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup void transfer: %w", lookupErr))
+	} else if voidFound {
+		return orchestrator.reconcile(ctx, current, errors.New("pending transfer is already voided"))
+	}
+	if _, postFound, lookupErr := orchestrator.ledger.LookupTransfer(postID); lookupErr != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup post transfer: %w", lookupErr))
+	} else if !postFound {
+		if postErr := orchestrator.ledger.Post(postID, pendingID); postErr != nil {
+			return orchestrator.reconcile(ctx, current, fmt.Errorf("post pending transfer: %w", postErr))
+		}
+	}
+	posted, err := orchestrator.store.Transition(ctx, current.IntentID, current.Version, intent.StatePosted)
+	if err != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("record posted state: %w", err))
+	}
+	return posted, nil
+}
+
+func (orchestrator *Orchestrator) VoidReserved(ctx context.Context, intentID string) (intent.Intent, error) {
+	current, err := orchestrator.store.Get(ctx, intentID)
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	if current.State == intent.StateVoided {
+		return current, nil
+	}
+	if current.State != intent.StateReserved {
+		return intent.Intent{}, ErrIntentNotReady
+	}
+	pendingID := orchestrator.PendingTransferID(current.IntentID)
+	postID := orchestrator.PostTransferID(current.IntentID)
+	voidID := orchestrator.VoidTransferID(current.IntentID)
+	if _, postFound, lookupErr := orchestrator.ledger.LookupTransfer(postID); lookupErr != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup post transfer: %w", lookupErr))
+	} else if postFound {
+		return orchestrator.reconcile(ctx, current, errors.New("pending transfer is already posted"))
+	}
+	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransfer(voidID); lookupErr != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup void transfer: %w", lookupErr))
+	} else if !voidFound {
+		if voidErr := orchestrator.ledger.Void(voidID, pendingID); voidErr != nil {
+			return orchestrator.reconcile(ctx, current, fmt.Errorf("void pending transfer: %w", voidErr))
+		}
+	}
+	voided, err := orchestrator.store.Transition(ctx, current.IntentID, current.Version, intent.StateVoided)
+	if err != nil {
+		return orchestrator.reconcile(ctx, current, fmt.Errorf("record voided state: %w", err))
+	}
+	return voided, nil
+}
+
+func (orchestrator *Orchestrator) PostTransferID(intentID string) tigerbeetle.Uint128 {
+	return deterministicID("post", intentID)
+}
+
+func (orchestrator *Orchestrator) VoidTransferID(intentID string) tigerbeetle.Uint128 {
+	return deterministicID("void", intentID)
+}

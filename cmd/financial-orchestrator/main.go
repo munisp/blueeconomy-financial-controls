@@ -20,7 +20,8 @@ import (
 )
 
 func main() {
-	intentID := flag.String("intent-id", "", "approved financial intent identifier")
+	intentID := flag.String("intent-id", "", "financial intent identifier")
+	operation := flag.String("operation", "reserve", "one of: reserve, post, void")
 	flag.Parse()
 	if strings.TrimSpace(*intentID) == "" {
 		fail(errors.New("--intent-id is required"))
@@ -60,7 +61,17 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	updated, err := orchestrator.ReserveApproved(ctx, *intentID)
+	var updated intent.Intent
+	switch *operation {
+	case "reserve":
+		updated, err = orchestrator.ReserveApproved(ctx, *intentID)
+	case "post":
+		updated, err = orchestrator.PostReserved(ctx, *intentID)
+	case "void":
+		updated, err = orchestrator.VoidReserved(ctx, *intentID)
+	default:
+		fail(errors.New("--operation must be one of reserve, post or void"))
+	}
 	if err != nil {
 		fail(err)
 	}

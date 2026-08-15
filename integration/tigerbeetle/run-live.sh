@@ -33,5 +33,5 @@ DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:5
 MIGRATION_PATH="$root/db/migrations/0001_financial_intents.sql" \
 TIGERBEETLE_CLUSTER_ID_HEX='00000000000000000000000000000000' \
 TIGERBEETLE_REPLICA_ADDRESSES='127.0.0.1:3001' \
-go test -tags liveintegration -race ./internal/orchestration -run TestReserveApprovedAgainstLiveTigerBeetle -count=1
-printf '%s\n' 'S3 live TigerBeetle orchestration passed: real accounts, approved PostgreSQL intent, pending transfer creation and ledger read-back.'
+go test -tags liveintegration -race ./internal/orchestration -run 'Test(ReserveApproved|VoidReserved)AgainstLiveTigerBeetle' -count=1
+printf '%s\n' 'S3 live TigerBeetle orchestration passed: real accounts, approved PostgreSQL intents, pending transfer reservation, post/void side effects, idempotent replay and ledger read-back.'
