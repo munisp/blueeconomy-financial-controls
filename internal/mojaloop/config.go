@@ -1,0 +1,97 @@
+package mojaloop
+
+import (
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Config struct {
+	BaseURL            *url.URL
+	Source             string
+	Destination        string
+	SigningKeyFile     string
+	SigningKeyID       string
+	SignatureAlgorithm string
+	CallbackBaseURL    *url.URL
+	CABundleFile       string
+	RequestTimeout     time.Duration
+}
+
+func LoadConfig() (Config, error) {
+	return LoadConfigFrom(os.Getenv)
+}
+
+func LoadConfigFrom(getenv func(string) string) (Config, error) {
+	baseURL, err := requiredHTTPSURL(getenv, "MOJALOOP_FSPIOP_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	callbackURL, err := requiredHTTPSURL(getenv, "MOJALOOP_CALLBACK_BASE_URL")
+	if err != nil {
+		return Config{}, err
+	}
+	config := Config{
+		BaseURL:            baseURL,
+		Source:             strings.TrimSpace(getenv("MOJALOOP_FSPIOP_SOURCE")),
+		Destination:        strings.TrimSpace(getenv("MOJALOOP_FSPIOP_DESTINATION")),
+		SigningKeyFile:     strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
+		SigningKeyID:       strings.TrimSpace(getenv("MOJALOOP_SIGNING_KID")),
+		SignatureAlgorithm: strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
+		CallbackBaseURL:    callbackURL,
+		CABundleFile:       strings.TrimSpace(getenv("MOJALOOP_CA_BUNDLE_FILE")),
+	}
+	if config.Source == "" || config.Destination == "" || config.SigningKeyFile == "" || config.SigningKeyID == "" || config.CABundleFile == "" {
+		return Config{}, errors.New("Mojaloop source, destination, signing key file, signing kid and CA bundle file are required")
+	}
+	if config.SignatureAlgorithm != "RS256" && config.SignatureAlgorithm != "RS384" && config.SignatureAlgorithm != "RS512" {
+		return Config{}, fmt.Errorf("unsupported Mojaloop signature algorithm %q", config.SignatureAlgorithm)
+	}
+	timeoutText := strings.TrimSpace(getenv("MOJALOOP_REQUEST_TIMEOUT"))
+	if timeoutText == "" {
+		config.RequestTimeout = 10 * time.Second
+	} else {
+		config.RequestTimeout, err = time.ParseDuration(timeoutText)
+		if err != nil || config.RequestTimeout < time.Second || config.RequestTimeout > 2*time.Minute {
+			return Config{}, errors.New("MOJALOOP_REQUEST_TIMEOUT must be between 1s and 2m")
+		}
+	}
+	return config, nil
+}
+
+func requiredHTTPSURL(getenv func(string) string, name string) (*url.URL, error) {
+	value := strings.TrimSpace(getenv(name))
+	if value == "" {
+		return nil, fmt.Errorf("%s is required", name)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return nil, fmt.Errorf("%s must be an HTTPS URL without userinfo", name)
+	}
+	return parsed, nil
+}
+
+func ValidateCABundle(pemBytes []byte) error {
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(pemBytes); !ok {
+		return errors.New("CA bundle contains no valid certificates")
+	}
+	return nil
+}
+
+func ParseBool(getenv func(string) string, name string, defaultValue bool) (bool, error) {
+	value := strings.TrimSpace(getenv(name))
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be boolean", name)
+	}
+	return parsed, nil
+}
