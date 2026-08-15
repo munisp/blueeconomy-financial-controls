@@ -26,7 +26,8 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	}
 	return NewStore(pool), nil
 }
-func (store *Store) Close() { store.pool.Close() }
+func (store *Store) Close()              { store.pool.Close() }
+func (store *Store) Pool() *pgxpool.Pool { return store.pool }
 func (store *Store) Exec(ctx context.Context, statement string) error {
 	_, err := store.pool.Exec(ctx, statement)
 	return err
