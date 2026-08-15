@@ -31,3 +31,13 @@ func TestCallbackHandlerRejectsWrongMethodAndPath(t *testing.T) {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
 	}
 }
+
+func TestCallbackHandlerRejectsRouteOutsideConfiguredProfile(t *testing.T) {
+	handler := CallbackHandler{ExpectedTransferPathPrefix: "/callbacks/transfers/"}
+	request := httptest.NewRequest(http.MethodPut, "/transfers/transfer-0001", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}

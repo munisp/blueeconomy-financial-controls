@@ -66,3 +66,25 @@ func TestLoadConfigRejectsNonCanonicalParticipantOrKID(t *testing.T) {
 		t.Fatal("identical source and destination accepted")
 	}
 }
+
+func TestLoadConfigBindsCallbackBasePathToTransferProfile(t *testing.T) {
+	environment := validMojaloopEnvironment()
+	config, err := LoadConfigFrom(func(name string) string { return environment[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CallbackTransferPathPrefix != "/callbacks/transfers/" {
+		t.Fatalf("unexpected callback transfer path prefix %q", config.CallbackTransferPathPrefix)
+	}
+	for _, callbackURL := range []string{
+		"https://fmmbe.example.invalid/callbacks?environment=sandbox",
+		"https://fmmbe.example.invalid/callbacks#fragment",
+		"https://fmmbe.example.invalid/callbacks/../other",
+	} {
+		invalid := validMojaloopEnvironment()
+		invalid["MOJALOOP_CALLBACK_BASE_URL"] = callbackURL
+		if _, err := LoadConfigFrom(func(name string) string { return invalid[name] }); err == nil {
+			t.Fatalf("callback base URL %q accepted", callbackURL)
+		}
+	}
+}

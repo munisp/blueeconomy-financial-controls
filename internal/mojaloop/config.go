@@ -6,21 +6,23 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 )
 
 type Config struct {
-	BaseURL            *url.URL
-	Source             string
-	Destination        string
-	SigningKeyFile     string
-	SigningKeyID       string
-	SignatureAlgorithm string
-	CallbackBaseURL    *url.URL
-	CABundleFile       string
-	RequestTimeout     time.Duration
+	BaseURL                    *url.URL
+	Source                     string
+	Destination                string
+	SigningKeyFile             string
+	SigningKeyID               string
+	SignatureAlgorithm         string
+	CallbackBaseURL            *url.URL
+	CallbackTransferPathPrefix string
+	CABundleFile               string
+	RequestTimeout             time.Duration
 }
 
 func LoadConfig() (Config, error) {
@@ -36,15 +38,20 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	callbackTransferPathPrefix, err := callbackTransferPathPrefix(callbackURL)
+	if err != nil {
+		return Config{}, err
+	}
 	config := Config{
-		BaseURL:            baseURL,
-		Source:             getenv("MOJALOOP_FSPIOP_SOURCE"),
-		Destination:        getenv("MOJALOOP_FSPIOP_DESTINATION"),
-		SigningKeyFile:     strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
-		SigningKeyID:       getenv("MOJALOOP_SIGNING_KID"),
-		SignatureAlgorithm: strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
-		CallbackBaseURL:    callbackURL,
-		CABundleFile:       strings.TrimSpace(getenv("MOJALOOP_CA_BUNDLE_FILE")),
+		BaseURL:                    baseURL,
+		Source:                     getenv("MOJALOOP_FSPIOP_SOURCE"),
+		Destination:                getenv("MOJALOOP_FSPIOP_DESTINATION"),
+		SigningKeyFile:             strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
+		SigningKeyID:               getenv("MOJALOOP_SIGNING_KID"),
+		SignatureAlgorithm:         strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
+		CallbackBaseURL:            callbackURL,
+		CallbackTransferPathPrefix: callbackTransferPathPrefix,
+		CABundleFile:               strings.TrimSpace(getenv("MOJALOOP_CA_BUNDLE_FILE")),
 	}
 	if config.Source == "" || config.Destination == "" || config.SigningKeyFile == "" || config.SigningKeyID == "" || config.CABundleFile == "" {
 		return Config{}, errors.New("Mojaloop source, destination, signing key file, signing kid and CA bundle file are required")
@@ -94,6 +101,24 @@ func requiredHTTPSURL(getenv func(string) string, name string) (*url.URL, error)
 		return nil, fmt.Errorf("%s must be an HTTPS URL without userinfo", name)
 	}
 	return parsed, nil
+}
+
+func callbackTransferPathPrefix(callbackURL *url.URL) (string, error) {
+	if callbackURL.RawQuery != "" || callbackURL.Fragment != "" {
+		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL must not contain query or fragment")
+	}
+	base := strings.TrimSuffix(callbackURL.EscapedPath(), "/")
+	if base == "." || base == "/." || strings.Contains(base, "..") {
+		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL must not contain traversal")
+	}
+	if base == "" || base == "/" {
+		return "/transfers/", nil
+	}
+	cleaned := path.Clean(base)
+	if !strings.HasPrefix(cleaned, "/") || cleaned == "." || cleaned == "/" {
+		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL path is invalid")
+	}
+	return cleaned + "/transfers/", nil
 }
 
 func ValidateCABundle(pemBytes []byte) error {

@@ -74,9 +74,9 @@ func run() error {
 		return errors.New("MOJALOOP_TLS_CERT_FILE and MOJALOOP_TLS_KEY_FILE are required")
 	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
-	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: &privateKey.PublicKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination}
+	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: &privateKey.PublicKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
 	mux := http.NewServeMux()
-	mux.Handle("/transfers/", handler)
+	mux.Handle(config.CallbackTransferPathPrefix, handler)
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) })
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

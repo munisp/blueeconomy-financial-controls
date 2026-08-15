@@ -10,18 +10,23 @@ import (
 )
 
 type CallbackHandler struct {
-	Store               *CallbackStore
-	VerificationKey     *rsa.PublicKey
-	ExpectedSource      string
-	ExpectedDestination string
+	Store                      *CallbackStore
+	VerificationKey            *rsa.PublicKey
+	ExpectedSource             string
+	ExpectedDestination        string
+	ExpectedTransferPathPrefix string
 }
 
 func (handler CallbackHandler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPut || !strings.HasPrefix(request.URL.Path, "/transfers/") {
+	pathPrefix := handler.ExpectedTransferPathPrefix
+	if pathPrefix == "" {
+		pathPrefix = "/transfers/"
+	}
+	if request.Method != http.MethodPut || !strings.HasPrefix(request.URL.Path, pathPrefix) {
 		http.Error(response, "not found", http.StatusNotFound)
 		return
 	}
-	transferID := strings.TrimPrefix(request.URL.Path, "/transfers/")
+	transferID := strings.TrimPrefix(request.URL.Path, pathPrefix)
 	if transferID == "" || strings.Contains(transferID, "/") {
 		http.Error(response, "invalid transfer path", http.StatusBadRequest)
 		return
