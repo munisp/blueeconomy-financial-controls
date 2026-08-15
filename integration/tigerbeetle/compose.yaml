@@ -1,0 +1,11 @@
+# Local development only: one authentic TigerBeetle replica because this sandbox cannot host three replicas.
+# This topology is not production evidence and must not be used for Ministry deployment.
+services:
+  tigerbeetle-0:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9
+    command: start --experimental --addresses=0.0.0.0:3001 --memory=512MiB /data/0_0.tigerbeetle
+    network_mode: host
+    volumes:
+      - ./data:/data
+    security_opt:
+      - seccomp=unconfined
