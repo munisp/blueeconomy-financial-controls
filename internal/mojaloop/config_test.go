@@ -47,3 +47,22 @@ invalid
 		t.Fatal("malformed CA certificate accepted")
 	}
 }
+
+func TestLoadConfigRejectsNonCanonicalParticipantOrKID(t *testing.T) {
+	for name, value := range map[string]string{
+		"MOJALOOP_FSPIOP_SOURCE":      "FMMBE OPS",
+		"MOJALOOP_FSPIOP_DESTINATION": "SWITCH\n",
+		"MOJALOOP_SIGNING_KID":        "kid with spaces",
+	} {
+		environment := validMojaloopEnvironment()
+		environment[name] = value
+		if _, err := LoadConfigFrom(func(key string) string { return environment[key] }); err == nil {
+			t.Fatalf("%s=%q accepted", name, value)
+		}
+	}
+	environment := validMojaloopEnvironment()
+	environment["MOJALOOP_FSPIOP_DESTINATION"] = environment["MOJALOOP_FSPIOP_SOURCE"]
+	if _, err := LoadConfigFrom(func(key string) string { return environment[key] }); err == nil {
+		t.Fatal("identical source and destination accepted")
+	}
+}

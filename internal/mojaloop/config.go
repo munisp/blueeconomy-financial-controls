@@ -38,16 +38,24 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 	}
 	config := Config{
 		BaseURL:            baseURL,
-		Source:             strings.TrimSpace(getenv("MOJALOOP_FSPIOP_SOURCE")),
-		Destination:        strings.TrimSpace(getenv("MOJALOOP_FSPIOP_DESTINATION")),
+		Source:             getenv("MOJALOOP_FSPIOP_SOURCE"),
+		Destination:        getenv("MOJALOOP_FSPIOP_DESTINATION"),
 		SigningKeyFile:     strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
-		SigningKeyID:       strings.TrimSpace(getenv("MOJALOOP_SIGNING_KID")),
+		SigningKeyID:       getenv("MOJALOOP_SIGNING_KID"),
 		SignatureAlgorithm: strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
 		CallbackBaseURL:    callbackURL,
 		CABundleFile:       strings.TrimSpace(getenv("MOJALOOP_CA_BUNDLE_FILE")),
 	}
 	if config.Source == "" || config.Destination == "" || config.SigningKeyFile == "" || config.SigningKeyID == "" || config.CABundleFile == "" {
 		return Config{}, errors.New("Mojaloop source, destination, signing key file, signing kid and CA bundle file are required")
+	}
+	for name, value := range map[string]string{"MOJALOOP_FSPIOP_SOURCE": config.Source, "MOJALOOP_FSPIOP_DESTINATION": config.Destination, "MOJALOOP_SIGNING_KID": config.SigningKeyID} {
+		if err := canonicalReference(name, value); err != nil {
+			return Config{}, err
+		}
+	}
+	if config.Source == config.Destination {
+		return Config{}, errors.New("MOJALOOP_FSPIOP_SOURCE and MOJALOOP_FSPIOP_DESTINATION must identify distinct participants")
 	}
 	if config.SignatureAlgorithm != "RS256" && config.SignatureAlgorithm != "RS384" && config.SignatureAlgorithm != "RS512" {
 		return Config{}, fmt.Errorf("unsupported Mojaloop signature algorithm %q", config.SignatureAlgorithm)
@@ -62,6 +70,18 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 		}
 	}
 	return config, nil
+}
+
+func canonicalReference(name, value string) error {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 256 {
+		return fmt.Errorf("%s must be canonical text of at most 256 bytes", name)
+	}
+	for _, character := range value {
+		if character < 0x21 || character == 0x7f {
+			return fmt.Errorf("%s must not contain whitespace or control characters", name)
+		}
+	}
+	return nil
 }
 
 func requiredHTTPSURL(getenv func(string) string, name string) (*url.URL, error) {
