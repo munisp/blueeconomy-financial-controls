@@ -52,11 +52,23 @@ func TestRealPostgresIntentFlow(t *testing.T) {
 	if err != nil || requested.State != StateReservationRequested || requested.Version != 3 {
 		t.Fatalf("reservation request failed: %+v %v", requested, err)
 	}
+	reserved, err := store.Transition(ctx, request.IntentID, 3, StateReserved)
+	if err != nil || reserved.State != StateReserved || reserved.Version != 4 {
+		t.Fatalf("reserve transition failed: %+v %v", reserved, err)
+	}
+	posted, err := store.Transition(ctx, request.IntentID, 4, StatePosted)
+	if err != nil || posted.State != StatePosted || posted.Version != 5 {
+		t.Fatalf("post transition failed: %+v %v", posted, err)
+	}
+	listed, err := store.ListReconciliationIntents(ctx)
+	if err != nil || len(listed) != 1 || listed[0].ExternalRef != request.ExternalRef || listed[0].State != StatePosted {
+		t.Fatalf("reconciliation listing failed: %+v %v", listed, err)
+	}
 	var outboxCount int
 	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM financial_intent_outbox WHERE intent_id = $1`, request.IntentID).Scan(&outboxCount); err != nil {
 		t.Fatal(err)
 	}
-	if outboxCount != 3 {
-		t.Fatalf("outbox count = %d, want 3", outboxCount)
+	if outboxCount != 5 {
+		t.Fatalf("outbox count = %d, want 5", outboxCount)
 	}
 }

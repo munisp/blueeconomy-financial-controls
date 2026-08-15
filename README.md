@@ -1,6 +1,6 @@
 # Blue Economy Financial Controls
 
-This repository contains the real TigerBeetle ledger integration boundary and durable financial-intent control for the platform. It uses the official TigerBeetle Go client and supports explicit account creation plus two-phase pending, post and void transfer operations against an approved configured cluster. It also persists financial intent, maker/checker approval, reservation-request state, ambiguous outcomes and reconciliation-required evidence in PostgreSQL. It does **not** implement Mojaloop participant integration, payment instructions, settlement, reconciliation with an external payment provider or live-fund authorization.
+This repository contains the real TigerBeetle ledger integration boundary and durable financial-intent control for the platform. It uses the official TigerBeetle Go client and supports explicit account creation plus two-phase pending, post and void transfer operations against an approved configured cluster. It also persists financial intent, maker/checker approval, reservation-request state, ambiguous outcomes and reconciliation-required evidence in PostgreSQL. The `financial-reconcile` command reads posted/voided intents from that PostgreSQL store and compares them with an explicitly supplied external statement, producing hashed findings and failing closed when discrepancies exist. It does **not** implement Mojaloop participant integration, payment instructions, settlement, partner callback handling or live-fund authorization.
 
 ## Commands
 
@@ -17,7 +17,7 @@ This repository contains the real TigerBeetle ledger integration boundary and du
 
 The command has no default cluster, replica, ledger, code, account, amount or partner endpoint. It fails when any required environment value or identifier is absent, malformed or outside the TigerBeetle protocol width. Every client result is checked for the official `Created` status; a non-success result exits non-zero.
 
-The tagged financial-intent integration can be run with `scripts/verify-intent-local.sh`; it uses real PostgreSQL 16.4 and verifies exact external-reference replay, conflicting immutable-field rejection, distinct maker/checker approval, reservation-request state and three outbox records. The store does not call TigerBeetle automatically, so no live money movement occurs as a side effect of this local test.
+The tagged financial-intent integration can be run with `scripts/verify-intent-local.sh`; it uses real PostgreSQL 16.4 and verifies exact external-reference replay, conflicting immutable-field rejection, distinct maker/checker approval, reservation-request and posted states, reconciliation-intent listing and five outbox records. `financial-reconcile` requires `DATABASE_URL`, `STATEMENT_PATH` and `REPORT_PATH`; it reads only posted/voided intents, hashes the supplied statement bytes and returns non-zero when findings exist. The store does not call TigerBeetle automatically, so no live money movement occurs as a side effect of this local test.
 
 ## Financial and Mojaloop gate
 

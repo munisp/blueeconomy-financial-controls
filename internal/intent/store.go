@@ -85,6 +85,26 @@ func (store *Store) Create(ctx context.Context, request CreateRequest) (Intent, 
 	return retained, nil
 }
 
+func (store *Store) ListReconciliationIntents(ctx context.Context) ([]Intent, error) {
+	rows, err := store.pool.Query(ctx, `SELECT intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker, checker, state, created_at, updated_at, version FROM financial_intents WHERE state IN ($1, $2) ORDER BY external_ref`, StatePosted, StateVoided)
+	if err != nil {
+		return nil, fmt.Errorf("list reconciliation intents: %w", err)
+	}
+	defer rows.Close()
+	intents := make([]Intent, 0)
+	for rows.Next() {
+		retained, scanErr := scanIntent(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan reconciliation intent: %w", scanErr)
+		}
+		intents = append(intents, retained)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reconciliation intents: %w", err)
+	}
+	return intents, nil
+}
+
 func (store *Store) Get(ctx context.Context, intentID string) (Intent, error) {
 	retained, err := scanIntent(store.pool.QueryRow(ctx, `SELECT intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker, checker, state, created_at, updated_at, version FROM financial_intents WHERE intent_id = $1`, intentID))
 	if errors.Is(err, pgx.ErrNoRows) {
