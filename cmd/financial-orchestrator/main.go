@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -39,6 +40,11 @@ func main() {
 		fail(fmt.Errorf("parse TigerBeetle cluster ID: %w", err))
 	}
 	replicas := splitRequired("TIGERBEETLE_REPLICA_ADDRESSES")
+	if requiredBool("TIGERBEETLE_REQUIRE_SIX_REPLICAS", false) {
+		if err := validateProductionQuorum(clusterID, replicas); err != nil {
+			fail(err)
+		}
+	}
 	client, err := tigerbeetle.NewClient(clusterID, replicas)
 	if err != nil {
 		fail(fmt.Errorf("create TigerBeetle client: %w", err))
@@ -95,6 +101,39 @@ func splitRequired(name string) []string {
 		}
 	}
 	return parts
+}
+
+func requiredBool(name string, defaultValue bool) bool {
+	value, present := os.LookupEnv(name)
+	if !present || strings.TrimSpace(value) == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		fail(fmt.Errorf("%s must be a boolean", name))
+	}
+	return parsed
+}
+
+func validateProductionQuorum(clusterID tigerbeetle.Uint128, replicas []string) error {
+	if clusterID == (tigerbeetle.Uint128{}) {
+		return errors.New("TIGERBEETLE_CLUSTER_ID_HEX must not be the reserved zero test cluster when production quorum is required")
+	}
+	if len(replicas) != 6 {
+		return fmt.Errorf("TIGERBEETLE_REQUIRE_SIX_REPLICAS requires exactly 6 replica addresses, got %d", len(replicas))
+	}
+	seen := make(map[string]struct{}, len(replicas))
+	for _, replica := range replicas {
+		host, port, err := net.SplitHostPort(replica)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("replica address %q must be a non-empty host:port", replica)
+		}
+		if _, exists := seen[replica]; exists {
+			return fmt.Errorf("replica address %q is duplicated", replica)
+		}
+		seen[replica] = struct{}{}
+	}
+	return nil
 }
 
 func uint64Env(name string) uint64 {
