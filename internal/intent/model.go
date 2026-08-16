@@ -101,6 +101,8 @@ func ValidOperationalTransition(current, next State) bool {
 		return next == StateReserved || next == StateAmbiguous || next == StateReconciliationRequired
 	case StateReserved:
 		return next == StatePosted || next == StateVoided || next == StateAmbiguous || next == StateReconciliationRequired
+	case StateReconciliationRequired:
+		return next == StateReserved || next == StatePosted || next == StateVoided || next == StateAmbiguous
 	default:
 		return false
 	}

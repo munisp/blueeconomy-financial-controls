@@ -52,3 +52,16 @@ func TestOperationalTransitions(t *testing.T) {
 		t.Fatal("invalid financial transition accepted")
 	}
 }
+
+func TestReconciliationRequiredTransitions(t *testing.T) {
+	for _, next := range []State{StateReserved, StatePosted, StateVoided, StateAmbiguous} {
+		if !ValidOperationalTransition(StateReconciliationRequired, next) {
+			t.Fatalf("expected reconciliation-required -> %s to be allowed", next)
+		}
+	}
+	for _, next := range []State{StateApproved, StateReservationRequested, StateReconciliationRequired} {
+		if ValidOperationalTransition(StateReconciliationRequired, next) {
+			t.Fatalf("expected reconciliation-required -> %s to be rejected", next)
+		}
+	}
+}

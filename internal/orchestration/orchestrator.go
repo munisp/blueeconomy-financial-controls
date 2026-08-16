@@ -184,3 +184,46 @@ func (orchestrator *Orchestrator) PostTransferID(intentID string) tigerbeetle.Ui
 func (orchestrator *Orchestrator) VoidTransferID(intentID string) tigerbeetle.Uint128 {
 	return deterministicID("void", intentID)
 }
+
+// ReconcileObserved repairs a reconciliation-required intent only from observed
+// deterministic TigerBeetle transfer records. Missing or contradictory evidence
+// becomes AMBIGUOUS instead of being guessed.
+func (orchestrator *Orchestrator) ReconcileObserved(ctx context.Context, intentID string) (intent.Intent, error) {
+	current, err := orchestrator.store.Get(ctx, intentID)
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	if current.State != intent.StateReconciliationRequired {
+		return intent.Intent{}, ErrIntentNotReady
+	}
+	pendingFound, err := orchestrator.lookupObserved(orchestrator.PendingTransferID(current.IntentID))
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	postFound, err := orchestrator.lookupObserved(orchestrator.PostTransferID(current.IntentID))
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	voidFound, err := orchestrator.lookupObserved(orchestrator.VoidTransferID(current.IntentID))
+	if err != nil {
+		return intent.Intent{}, err
+	}
+	next := intent.StateAmbiguous
+	switch {
+	case postFound && !voidFound:
+		next = intent.StatePosted
+	case voidFound && !postFound:
+		next = intent.StateVoided
+	case pendingFound && !postFound && !voidFound:
+		next = intent.StateReserved
+	}
+	return orchestrator.store.Transition(ctx, current.IntentID, current.Version, next)
+}
+
+func (orchestrator *Orchestrator) lookupObserved(id tigerbeetle.Uint128) (bool, error) {
+	_, found, err := orchestrator.ledger.LookupTransfer(id)
+	if err != nil {
+		return false, fmt.Errorf("lookup observed TigerBeetle transfer: %w", err)
+	}
+	return found, nil
+}
