@@ -190,3 +190,84 @@ func requiredEnv(t *testing.T, name string) string {
 	}
 	return value
 }
+
+func TestReconcileObservedAgainstLiveTigerBeetle(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		action func(context.Context, *Orchestrator, *ledger.Service, string) error
+		want   intent.State
+	}{
+		{"pending", func(context.Context, *Orchestrator, *ledger.Service, string) error { return nil }, intent.StateReserved},
+		{"post", func(ctx context.Context, o *Orchestrator, l *ledger.Service, id string) error {
+			return l.Post(o.PostTransferID(id), o.PendingTransferID(id))
+		}, intent.StatePosted},
+		{"void", func(ctx context.Context, o *Orchestrator, l *ledger.Service, id string) error {
+			return l.Void(o.VoidTransferID(id), o.PendingTransferID(id))
+		}, intent.StateVoided},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			store, err := intent.Open(ctx, requiredEnv(t, "DATABASE_URL"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			cluster, err := tigerbeetle.HexStringToUint128(requiredEnv(t, "TIGERBEETLE_CLUSTER_ID_HEX"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := tigerbeetle.NewClient(cluster, strings.Split(requiredEnv(t, "TIGERBEETLE_REPLICA_ADDRESSES"), ","))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			service, err := ledger.New(client, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed := time.Now().UnixNano()
+			debitText := fmt.Sprintf("%032x", seed)
+			creditText := fmt.Sprintf("%032x", seed+1)
+			debit, _ := tigerbeetle.HexStringToUint128(debitText)
+			credit, _ := tigerbeetle.HexStringToUint128(creditText)
+			if err := service.CreateAccount(debit, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := service.CreateAccount(credit, true); err != nil {
+				t.Fatal(err)
+			}
+			id := fmt.Sprintf("live-reconcile-%s-%d", scenario.name, seed)
+			created, err := store.Create(ctx, intent.CreateRequest{IntentID: id, ExternalRef: id + "-external", DebitAccountID: debitText, CreditAccountID: creditText, Amount: 100, Ledger: 1, Code: 1, Currency: "NGN", Maker: "reconcile-maker"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved, err := store.Approve(ctx, created.IntentID, created.Version, "reconcile-checker")
+			if err != nil {
+				t.Fatal(err)
+			}
+			o, err := New(store, service, 60)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reserved, err := o.ReserveApproved(ctx, approved.IntentID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requiring, err := store.Transition(ctx, reserved.IntentID, reserved.Version, intent.StateReconciliationRequired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := scenario.action(ctx, o, service, id); err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := o.ReconcileObserved(ctx, requiring.IntentID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.State != scenario.want {
+				t.Fatalf("want %s got %s", scenario.want, resolved.State)
+			}
+		})
+	}
+}
