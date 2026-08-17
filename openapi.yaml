@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: Blue Economy S3 Maritime Finance API
+  version: 1.0.0
+  description: Local financial-intent and Mojaloop callback contract. Participant, Hub, mTLS, OAuth, ILP and settlement values are external G2 manifest inputs.
+paths:
+  /healthz:
+    get: {responses: {'200': {description: Service health.}}}
+  /v1/financial-intents:
+    post:
+      operationId: createFinancialIntent
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FinancialIntentCreate'}}}}
+      responses: {'201': {description: Intent created.}, '409': {description: Idempotency conflict.}, '422': {description: Invalid intent.}}
+  /v1/financial-intents/{intent_id}/approve:
+    post:
+      operationId: approveFinancialIntent
+      parameters: [{$ref: '#/components/parameters/IntentID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
+      responses: {'200': {description: Intent approved.}, '409': {description: Version or maker/checker conflict.}}
+  /v1/mojaloop/transfers/{transfer_id}:
+    put:
+      operationId: receiveMojaloopTransferCallback
+      description: Callback profile is bound to the configured callback base path. External Hub must supply mTLS/OAuth/JWS/KID manifest values.
+      parameters: [{$ref: '#/components/parameters/TransferID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FSPIOPCallback'}}}}
+      responses: {'200': {description: Callback persisted or exact terminal replay.}, '409': {description: Callback conflict/regression.}, '422': {description: Signature/profile validation failed.}}
+components:
+  parameters:
+    IntentID: {name: intent_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    TransferID: {name: transfer_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+  schemas:
+    FinancialIntentCreate:
+      type: object
+      additionalProperties: false
+      required: [intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker]
+      properties:
+        intent_id: {type: string, minLength: 1, maxLength: 256}
+        external_ref: {type: string, minLength: 1, maxLength: 256}
+        debit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        credit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
+        amount: {type: integer, minimum: 1}
+        ledger: {type: integer, minimum: 1}
+        code: {type: integer, minimum: 1}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        maker: {type: string, minLength: 1, maxLength: 256}
+    Approval:
+      type: object
+      additionalProperties: false
+      required: [expected_version, checker]
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        checker: {type: string, minLength: 1, maxLength: 256}
+    FSPIOPCallback:
+      type: object
+      description: Actual callback body is validated together with HTTP JWS/mTLS profile and durable state transition rules.
+      required: [transferState]
+      properties:
+        transferState: {type: string, enum: [RESERVED, COMMITTED, ABORTED]}
