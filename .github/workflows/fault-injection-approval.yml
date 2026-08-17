@@ -1,0 +1,29 @@
+name: fault-injection-approval
+on:
+  pull_request:
+    paths:
+      - 'scripts/validate-fault-injection-approval.py'
+      - 'fixtures/fault-injection-approval.valid.json'
+      - 'approvals/tigerbeetle-fault-injection/**/*.json'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/validate-fault-injection-approval.py'
+      - 'fixtures/fault-injection-approval.valid.json'
+      - 'approvals/tigerbeetle-fault-injection/**/*.json'
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate canonical approval fixture
+        run: python3 scripts/validate-fault-injection-approval.py fixtures/fault-injection-approval.valid.json
+      - name: Validate submitted approvals
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob globstar
+          approvals=(approvals/tigerbeetle-fault-injection/**/*.json)
+          for approval in "${approvals[@]}"; do
+            python3 scripts/validate-fault-injection-approval.py "$approval"
+          done
