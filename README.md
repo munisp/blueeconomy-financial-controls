@@ -73,7 +73,11 @@ The `internal/cvff` package implements the CVFF four-party approval chain as a s
 
 The multi-stage `Dockerfile` builds every command statically and ships distroless non-root runtime targets: `cvff-worker`, `outbox-publisher`, `intent-api`, `financial-orchestrator`, `financial-reconcile`, `mojaloop-adapter`. Build one with `docker build --target cvff-worker .`.
 
-`intent-api` serves the `openapi.yaml` financial-intent contract (`GET /healthz`, `POST /v1/financial-intents`, `POST /v1/financial-intents/{intent_id}/approve`) backed by the durable store. Required: `DATABASE_URL`, `INTENT_API_LISTEN_ADDR`. The platform ingress terminates mTLS/OAuth per the openapi description.
+`intent-api` serves the `openapi.yaml` financial-intent contract (`GET /healthz`, `GET /readyz`, `GET /metrics`, `POST /v1/financial-intents`, `POST /v1/financial-intents/{intent_id}/approve`) backed by the durable store. Required: `DATABASE_URL`, `INTENT_API_LISTEN_ADDR`. The platform ingress terminates mTLS/OAuth per the openapi description. `/readyz` fails closed (503) unless the store exposes and passes a `Ping`.
+
+### Telemetry (intent-api, mojaloop-adapter)
+
+Both HTTP binaries wire `internal/telemetry`: per-request OpenTelemetry server spans renamed to the matched route pattern, request count/duration histograms on `GET /metrics` (local-only, private Prometheus registry), and CVFF approval span attributes (`cvff.intent_id`, `cvff.approval.checker`). Tracing is **disabled by default** with an explicit no-op tracer and a startup log line; setting `OTEL_EXPORTER_OTLP_ENDPOINT` (`host:port`, no scheme/credentials) enables OTLP gRPC export. `OTEL_EXPORTER_OTLP_INSECURE`, `OTEL_SERVICE_NAME` and `OTEL_SDK_DISABLED` (true/false only) are honoured; malformed or contradictory telemetry configuration fails closed at startup, and the telemetry pipeline is a required constructor dependency of the intent handler.
 
 ## Financial and Mojaloop gate
 

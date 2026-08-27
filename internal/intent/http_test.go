@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 type fakeAPIStore struct {
@@ -31,7 +33,12 @@ func (store *fakeAPIStore) Approve(_ context.Context, intentID string, expectedV
 
 func newTestHandler(t *testing.T, store APIStore) http.Handler {
 	t.Helper()
-	handler, err := NewHandler(store)
+	pipeline, err := telemetry.Setup(context.Background(), telemetry.Config{ServiceName: "intent-api-test"})
+	if err != nil {
+		t.Fatalf("disabled telemetry setup: %v", err)
+	}
+	t.Cleanup(func() { _ = pipeline.Shutdown(context.Background()) })
+	handler, err := NewHandler(store, pipeline)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -39,8 +46,30 @@ func newTestHandler(t *testing.T, store APIStore) http.Handler {
 }
 
 func TestHandlerRequiresStore(t *testing.T) {
-	if _, err := NewHandler(nil); err == nil {
+	if _, err := NewHandler(nil, nil); err == nil {
 		t.Fatal("nil store accepted")
+	}
+}
+
+func TestHandlerFailsClosedWithoutTelemetry(t *testing.T) {
+	if _, err := NewHandler(&fakeAPIStore{}, nil); err == nil {
+		t.Fatal("nil telemetry pipeline accepted")
+	}
+}
+
+func TestReadyzFailsClosedWithoutPingCapableStore(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	newTestHandler(t, &fakeAPIStore{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz must fail closed with 503 for a store without Ping, got %d", recorder.Code)
+	}
+}
+
+func TestMetricsEndpointServed(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	newTestHandler(t, &fakeAPIStore{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /metrics must serve 200, got %d", recorder.Code)
 	}
 }
 

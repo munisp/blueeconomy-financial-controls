@@ -28,6 +28,9 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 }
 func (store *Store) Close()              { store.pool.Close() }
 func (store *Store) Pool() *pgxpool.Pool { return store.pool }
+
+// Ping verifies the intent database is reachable for readiness probes.
+func (store *Store) Ping(ctx context.Context) error { return store.pool.Ping(ctx) }
 func (store *Store) Exec(ctx context.Context, statement string) error {
 	_, err := store.pool.Exec(ctx, statement)
 	return err

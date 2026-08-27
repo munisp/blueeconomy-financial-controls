@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 func main() {
@@ -30,12 +31,32 @@ func run() error {
 	listenAddr := required("INTENT_API_LISTEN_ADDR")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	telemetryConfig, err := telemetry.LoadConfig("intent-api")
+	if err != nil {
+		return fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := pipeline.Shutdown(shutdownCtx); err != nil {
+			log.Printf("intent-api: telemetry shutdown: %v", err)
+		}
+	}()
+	if pipeline.Enabled() {
+		log.Printf("intent-api: telemetry traces exporting to %s; Prometheus metrics on GET /metrics", telemetryConfig.Endpoint)
+	} else {
+		log.Printf("intent-api: telemetry tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set); explicit no-op tracer, Prometheus metrics on GET /metrics")
+	}
 	store, err := intent.Open(ctx, databaseURL)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	handler, err := intent.NewHandler(store)
+	handler, err := intent.NewHandler(store, pipeline)
 	if err != nil {
 		return err
 	}

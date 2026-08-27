@@ -15,6 +15,7 @@ import (
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
 	"github.com/munisp/blueeconomy-financial-controls/internal/mojaloop"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 func main() {
@@ -84,12 +85,42 @@ func run() error {
 	if certificateFile == "" || privateCertificateKeyFile == "" {
 		return errors.New("MOJALOOP_TLS_CERT_FILE and MOJALOOP_TLS_KEY_FILE are required")
 	}
+	telemetryConfig, err := telemetry.LoadConfig("mojaloop-adapter")
+	if err != nil {
+		return err
+	}
+	setupContext, setupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pipeline, err := telemetry.Setup(setupContext, telemetryConfig)
+	setupCancel()
+	if err != nil {
+		return fmt.Errorf("setup telemetry: %w", err)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = pipeline.Shutdown(shutdownContext)
+	}()
+	if pipeline.Enabled() {
+		fmt.Printf("mojaloop-adapter: telemetry traces exporting to %s; Prometheus metrics on GET /metrics\n", telemetryConfig.Endpoint)
+	} else {
+		fmt.Println("mojaloop-adapter: telemetry tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set); explicit no-op tracer, Prometheus metrics on GET /metrics")
+	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
 	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
 	mux := http.NewServeMux()
 	mux.Handle(config.CallbackTransferPathPrefix, handler)
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) })
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
+	mux.HandleFunc("GET /readyz", func(response http.ResponseWriter, request *http.Request) {
+		probeContext, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+		defer cancel()
+		if err := store.Ping(probeContext); err != nil {
+			http.Error(response, "store is not reachable", http.StatusServiceUnavailable)
+			return
+		}
+		response.WriteHeader(http.StatusNoContent)
+	})
+	mux.Handle("GET /metrics", pipeline.MetricsHandler())
+	server := &http.Server{Addr: address, Handler: pipeline.Middleware(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {

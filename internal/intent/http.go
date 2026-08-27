@@ -6,6 +6,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 // APIStore is the persistence boundary used by the HTTP API.
@@ -16,28 +21,49 @@ type APIStore interface {
 
 // Handler implements the openapi.yaml financial-intent contract.
 type Handler struct {
-	store APIStore
-	mux   *http.ServeMux
+	store   APIStore
+	mux     *http.ServeMux
+	handler http.Handler
 }
 
-// NewHandler fails closed when the store is absent.
-func NewHandler(store APIStore) (*Handler, error) {
+// NewHandler fails closed when the store or the telemetry pipeline is absent.
+func NewHandler(store APIStore, pipeline *telemetry.Telemetry) (*Handler, error) {
 	if store == nil {
 		return nil, errors.New("intent store is required")
 	}
+	if pipeline == nil {
+		return nil, errors.New("telemetry pipeline is required (fail-closed); use telemetry.Setup with a disabled config for no-op tracing")
+	}
 	handler := &Handler{store: store, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("GET /healthz", handler.health)
+	handler.mux.HandleFunc("GET /readyz", handler.readyz)
+	handler.mux.Handle("GET /metrics", pipeline.MetricsHandler())
 	handler.mux.HandleFunc("POST /v1/financial-intents", handler.create)
 	handler.mux.HandleFunc("POST /v1/financial-intents/{intent_id}/approve", handler.approve)
+	handler.handler = pipeline.Middleware(handler.mux)
 	return handler, nil
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	handler.mux.ServeHTTP(writer, request)
+	handler.handler.ServeHTTP(writer, request)
 }
 
 func (handler *Handler) health(writer http.ResponseWriter, _ *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// readyz fails closed unless the store exposes and passes a Ping.
+func (handler *Handler) readyz(writer http.ResponseWriter, request *http.Request) {
+	pinger, ok := handler.store.(interface{ Ping(context.Context) error })
+	if !ok {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("intent store does not expose readiness"))
+		return
+	}
+	if err := pinger.Ping(request.Context()); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, errors.New("intent store is not reachable"))
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (handler *Handler) create(writer http.ResponseWriter, request *http.Request) {
@@ -82,6 +108,13 @@ func (handler *Handler) approve(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusUnprocessableEntity, errors.New("expected_version and checker are required"))
 		return
 	}
+	// Record the CVFF maker/checker approval on the active span (no-op when
+	// telemetry is disabled). The checker identity is already approval
+	// evidence; the maker subject is never logged here.
+	trace.SpanFromContext(request.Context()).SetAttributes(
+		attribute.String("cvff.intent_id", intentID),
+		attribute.String("cvff.approval.checker", approval.Checker),
+	)
 	updated, err := handler.store.Approve(request.Context(), intentID, approval.ExpectedVersion, approval.Checker)
 	if err != nil {
 		switch {
