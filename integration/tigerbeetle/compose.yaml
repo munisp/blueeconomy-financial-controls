@@ -2,7 +2,7 @@
 # This topology is not production evidence and must not be used for Ministry deployment.
 services:
   tigerbeetle-0:
-    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9@sha256:48f623f9c1e9b6cc44d77ca93634595ae99cce3246ded418763eb1a62eee45e9
     command: start --experimental --addresses=0.0.0.0:3001 --memory=512MiB /data/0_0.tigerbeetle
     network_mode: host
     volumes:

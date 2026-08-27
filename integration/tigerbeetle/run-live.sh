@@ -14,7 +14,7 @@ trap cleanup EXIT
 rm -rf "$data"
 mkdir -p "$data"
 for replica in 0; do
-  sudo docker run --rm --network host --security-opt seccomp=unconfined -v "$data:/data" ghcr.io/tigerbeetle/tigerbeetle:0.17.9 \
+  sudo docker run --rm --network host --security-opt seccomp=unconfined -v "$data:/data" ghcr.io/tigerbeetle/tigerbeetle:0.17.9@sha256:48f623f9c1e9b6cc44d77ca93634595ae99cce3246ded418763eb1a62eee45e9 \
     format --cluster=0 --replica="$replica" --replica-count=1 "/data/0_${replica}.tigerbeetle"
 done
 "${pg_compose[@]}" up -d --wait postgres

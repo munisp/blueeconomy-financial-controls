@@ -21,6 +21,29 @@ The command has no default cluster, replica, ledger, code, account, amount or pa
 
 The tagged financial-intent integration can be run with `scripts/verify-intent-local.sh`; it uses real PostgreSQL 16.4 and verifies exact external-reference replay, conflicting immutable-field rejection, distinct maker/checker approval, reservation-request and posted states, reconciliation-intent listing and five outbox records. `scripts/verify-mojaloop-local.sh` applies the committed callback migration and verifies signed-boundary logic, reserve/commit transitions, exact replays, terminal replays and regression rejection against real PostgreSQL. `financial-reconcile` requires `DATABASE_URL`, `STATEMENT_PATH` and `REPORT_PATH`; it reads only posted/voided intents, hashes the supplied statement bytes and returns non-zero when findings exist. The store does not call TigerBeetle or a Mojaloop partner automatically, so no live money movement occurs as a side effect of these local tests.
 
+## Running the integration suites locally
+
+All integration tests require Docker and use only pinned images.
+
+PostgreSQL-backed store tests (build tag `integration`; they fail the build on error and are not skipped):
+
+```bash
+docker compose -f docker-compose.integration.yml up -d --wait postgres
+export DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55435/blueeconomy_finance?sslmode=disable'
+MIGRATION_PATH=db/migrations/0001_financial_intents.sql go test -tags integration -race -count=1 ./internal/intent
+MOJALOOP_MIGRATION_PATH=db/migrations/0002_mojaloop_callbacks.sql go test -tags integration -race -count=1 ./internal/mojaloop
+MIGRATION_PATH=db/migrations go test -tags integration -race -count=1 ./internal/cvff
+docker compose -f docker-compose.integration.yml down -v
+```
+
+Live single-replica TigerBeetle orchestration (reserve/post/void, idempotent replay, ledger read-back):
+
+```bash
+./integration/tigerbeetle/run-live.sh
+```
+
+Both suites run in CI (`.github/workflows/integration.yml`): PostgreSQL runs as a pinned `services:` container and TigerBeetle via `integration/tigerbeetle/compose.yaml`; service logs are uploaded as artifacts on failure. The six-replica quorum tests (`-tags liveintegration`, `TestSixReplicaQuorum*`) are deliberately excluded from CI: they fail closed without `TB_QUORUM_TEST_ENABLED=true`, an authorization reference and an approved six-replica cluster under the fault-injection change-control process.
+
 ## CVFF four-party disbursement rail
 
 The `internal/cvff` package implements the CVFF four-party approval chain as a state machine: `SUBMITTED → UNDERWRITING_PRIMARY → UNDERWRITING_SECONDARY → UNDERWRITING_TERTIARY → NIMASA_APPROVAL → BANK_CONFIRMATION → DISBURSEMENT_PENDING → DISBURSED → AUDITED`, with fail-closed `REJECTED` and `RECONCILIATION_REQUIRED` branches. Each role (PLI consortium tiers at 50/35/15, NIMASA approver, receiving bank, beneficiary) approves only its own lifecycle part; every decision is an immutable `cvff_approvals` entry carrying the approver's Keycloak principal ID, and the database enforces separation of duties (`UNIQUE (application_id, principal_id)` on role assignments, plus an immutability trigger on approvals). Underwriting SLAs are PRIMARY 5, SECONDARY 3 and TERTIARY 2 business days; expiry raises an escalation audit event and never auto-approves.

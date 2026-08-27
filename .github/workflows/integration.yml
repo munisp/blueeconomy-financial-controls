@@ -1,0 +1,116 @@
+name: Live Integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.4@sha256:e62fbf9d3e2b49816a32c400ed2dba83e3b361e6833e624024309c35d334b412
+        env:
+          POSTGRES_DB: blueeconomy_finance
+          POSTGRES_USER: blueeconomy
+          POSTGRES_PASSWORD: local-only-integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blueeconomy -d blueeconomy_finance"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://blueeconomy:local-only-integration-password@127.0.0.1:5432/blueeconomy_finance?sslmode=disable
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run financial-intent store tests against live PostgreSQL
+        env:
+          MIGRATION_PATH: db/migrations/0001_financial_intents.sql
+        run: go test -tags integration -race -count=1 ./internal/intent
+      - name: Run Mojaloop callback store tests against live PostgreSQL
+        env:
+          MOJALOOP_MIGRATION_PATH: db/migrations/0002_mojaloop_callbacks.sql
+        run: go test -tags integration -race -count=1 ./internal/mojaloop
+      - name: Run CVFF four-party store tests against live PostgreSQL
+        env:
+          MIGRATION_PATH: db/migrations
+        run: go test -tags integration -race -count=1 ./internal/cvff
+      - name: Capture PostgreSQL service logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p integration-logs
+          docker ps -a > integration-logs/docker-ps.txt 2>&1 || true
+          for container in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}}' "$container" | tr -d '/')
+            docker logs "$container" > "integration-logs/${name}.log" 2>&1 || true
+          done
+      - name: Upload integration logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: postgres-integration-logs
+          path: integration-logs/
+          if-no-files-found: error
+          retention-days: 14
+
+  tigerbeetle-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run single-replica live TigerBeetle orchestration suite
+        # Brings up pinned PostgreSQL (docker-compose.integration.yml) and one
+        # pinned TigerBeetle replica (integration/tigerbeetle/compose.yaml),
+        # then exercises reserve/post/void, idempotent replay and read-back.
+        run: ./integration/tigerbeetle/run-live.sh
+      - name: Capture service logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p integration-logs
+          docker ps -a > integration-logs/docker-ps.txt 2>&1 || true
+          for container in $(docker ps -aq); do
+            name=$(docker inspect --format '{{.Name}}' "$container" | tr -d '/')
+            docker logs "$container" > "integration-logs/${name}.log" 2>&1 || true
+          done
+      - name: Upload integration logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tigerbeetle-live-logs
+          path: integration-logs/
+          if-no-files-found: error
+          retention-days: 14
+
+# The six-replica quorum and reconciliation tests
+# (internal/orchestration, -tags liveintegration, TestSixReplicaQuorum*)
+# stay deliberately fail-closed: they require a six-replica cluster plus
+# TB_QUORUM_TEST_ENABLED=true, TB_QUORUM_AUTHORIZATION_REF and TB_QUORUM_CASE
+# under the fault-injection change-control process, so they are not part of
+# per-change CI.
