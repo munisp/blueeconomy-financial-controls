@@ -71,6 +71,9 @@ func (request CreateRequest) Validate() error {
 	if request.Ledger == 0 || request.Code == 0 {
 		return errors.New("ledger and code must be non-zero")
 	}
+	if request.Currency != "NGN" && request.Currency != "USD" {
+		return fmt.Errorf("currency %q is not an approved ledger currency (NGN, USD)", request.Currency)
+	}
 	return nil
 }
 

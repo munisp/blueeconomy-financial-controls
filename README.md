@@ -21,6 +21,37 @@ The command has no default cluster, replica, ledger, code, account, amount or pa
 
 The tagged financial-intent integration can be run with `scripts/verify-intent-local.sh`; it uses real PostgreSQL 16.4 and verifies exact external-reference replay, conflicting immutable-field rejection, distinct maker/checker approval, reservation-request and posted states, reconciliation-intent listing and five outbox records. `scripts/verify-mojaloop-local.sh` applies the committed callback migration and verifies signed-boundary logic, reserve/commit transitions, exact replays, terminal replays and regression rejection against real PostgreSQL. `financial-reconcile` requires `DATABASE_URL`, `STATEMENT_PATH` and `REPORT_PATH`; it reads only posted/voided intents, hashes the supplied statement bytes and returns non-zero when findings exist. The store does not call TigerBeetle or a Mojaloop partner automatically, so no live money movement occurs as a side effect of these local tests.
 
+## CVFF four-party disbursement rail
+
+The `internal/cvff` package implements the CVFF four-party approval chain as a state machine: `SUBMITTED → UNDERWRITING_PRIMARY → UNDERWRITING_SECONDARY → UNDERWRITING_TERTIARY → NIMASA_APPROVAL → BANK_CONFIRMATION → DISBURSEMENT_PENDING → DISBURSED → AUDITED`, with fail-closed `REJECTED` and `RECONCILIATION_REQUIRED` branches. Each role (PLI consortium tiers at 50/35/15, NIMASA approver, receiving bank, beneficiary) approves only its own lifecycle part; every decision is an immutable `cvff_approvals` entry carrying the approver's Keycloak principal ID, and the database enforces separation of duties (`UNIQUE (application_id, principal_id)` on role assignments, plus an immutability trigger on approvals). Underwriting SLAs are PRIMARY 5, SECONDARY 3 and TERTIARY 2 business days; expiry raises an escalation audit event and never auto-approves.
+
+`internal/workflow` implements the Temporal `CVFFDisbursementWorkflow` (go.temporal.io/sdk) with per-tier SLA timers, decision signals (`cvff.underwriting-decision`, `cvff.nimasa-decision`, `cvff.bank-confirmation`, `cvff.beneficiary-confirmation`) and observer-replay queries (`cvff.state`, `cvff.history`). `internal/fx` captures the admin-entered, dual-control-confirmed CBN reference rate (NGN per USD, fixed-point micro scale; no external rate API). `internal/ledger` posts the FX pass-through pair — an NGN custodial fee transfer and a USD-denominated cost transfer with deterministic idempotent IDs — and `internal/cvff` records the dual-ledger legs and report. Currency fields are constrained to NGN and USD. `internal/outbox` drains both transactional outboxes to Kafka with the platform FHIR-aligned envelope (`envelopeVersion` 1.0, `eventType` `cvff.disbursement.v1`, `classification` `FIDUCIARY_SEGREGATED`), at-least-once with the outbox event ID as the idempotent Kafka key.
+
+### New commands and environment
+
+`cvff-worker` runs the Temporal worker. All values are required; the process exits non-zero when any is absent.
+
+| Variable | Purpose |
+|---|---|
+| `TEMPORAL_HOST_PORT` | Temporal frontend address (e.g. `temporal:7233`). |
+| `TEMPORAL_NAMESPACE` | Temporal namespace. |
+| `TEMPORAL_TASK_QUEUE` | Task queue the worker polls. |
+| `DATABASE_URL` | PostgreSQL DSN holding the CVFF schema (migration `0003`). |
+| `TIGERBEETLE_CLUSTER_ID_HEX` / `TIGERBEETLE_REPLICA_ADDRESSES` | Approved cluster identity and comma-separated replica addresses. |
+| `CVFF_NGN_DEBIT_ACCOUNT_ID_HEX` / `CVFF_NGN_CREDIT_ACCOUNT_ID_HEX` | NGN custodial fee pair accounts (32-hex TigerBeetle IDs). |
+| `CVFF_USD_DEBIT_ACCOUNT_ID_HEX` / `CVFF_USD_CREDIT_ACCOUNT_ID_HEX` | USD cost pair accounts. |
+| `CVFF_NGN_LEDGER` / `CVFF_USD_LEDGER` | TigerBeetle ledger numbers per currency. |
+| `CVFF_FEE_CODE` / `CVFF_COST_CODE` | TigerBeetle transfer codes per leg. |
+| `CVFF_CUSTODIAL_FEE_BPS` | NGN custodial fee in basis points of the FX-adjusted NGN equivalent. |
+
+`outbox-publisher` drains `financial_intent_outbox` and `cvff_outbox` to Kafka. Required: `DATABASE_URL`, `KAFKA_BROKERS` (comma-separated), `KAFKA_TOPIC`, `OUTBOX_POLL_INTERVAL_SECONDS`, `OUTBOX_BATCH_SIZE`. It fails closed when Kafka or PostgreSQL is unavailable.
+
+### Container images
+
+The multi-stage `Dockerfile` builds every command statically and ships distroless non-root runtime targets: `cvff-worker`, `outbox-publisher`, `intent-api`, `financial-orchestrator`, `financial-reconcile`, `mojaloop-adapter`. Build one with `docker build --target cvff-worker .`.
+
+`intent-api` serves the `openapi.yaml` financial-intent contract (`GET /healthz`, `POST /v1/financial-intents`, `POST /v1/financial-intents/{intent_id}/approve`) backed by the durable store. Required: `DATABASE_URL`, `INTENT_API_LISTEN_ADDR`. The platform ingress terminates mTLS/OAuth per the openapi description.
+
 ## Financial and Mojaloop gate
 
 A write-capable TigerBeetle client is **not by itself a payment-platform implementation**. Before any financial flow can be enabled, the Ministry must approve the genuine non-production TigerBeetle cluster, account/ledger/code model, participant and settlement design, separation-of-duties controls, reconciliation policy, key/secret delivery, Mojaloop switch and participant endpoints, certificates, test participants, payment rulebook and financial-control sign-off. The operation must then pass two-phase transfer, duplicate, timeout, post, void, recovery and independent reconciliation tests.
