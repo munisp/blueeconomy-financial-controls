@@ -166,13 +166,44 @@ func TestAuthenticateAudienceViaAuthorizedParty(t *testing.T) {
 	}
 }
 
-func TestAuthenticateMissingBeneficiaryRoleForbidden(t *testing.T) {
+func TestAuthenticateWithoutRealmRolesStillVerifies(t *testing.T) {
+	// Authentication verifies the token only; role authorization is enforced
+	// per route by RequireRole so auditor and beneficiary surfaces can differ.
 	fixture := newJWKSFixture(t)
 	token := fixture.token(t, func(claims *keycloakClaims) {
 		claims.RealmAccess.Roles = []string{"cbn-observer"}
 	})
-	if _, err := fixture.authenticator(t).Authenticate(context.Background(), "Bearer "+token); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("error = %v, want ErrForbidden", err)
+	principal, err := fixture.authenticator(t).Authenticate(context.Background(), "Bearer "+token)
+	if err != nil {
+		t.Fatalf("verified role-less token rejected: %v", err)
+	}
+	if principal.hasRole(BeneficiaryRole) || principal.hasRole(AuditorRole) {
+		t.Fatalf("unexpected roles on principal: %+v", principal)
+	}
+}
+
+func TestRequireRoleMiddleware(t *testing.T) {
+	ok := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	for name, test := range map[string]struct {
+		authenticator Authenticator
+		role          string
+		want          int
+	}{
+		"role held":             {stubAuthenticator{principal: Principal{Subject: testSubject, Roles: []string{AuditorRole}}}, AuditorRole, http.StatusNoContent},
+		"role absent":           {stubAuthenticator{principal: Principal{Subject: testSubject, Roles: []string{BeneficiaryRole}}}, AuditorRole, http.StatusForbidden},
+		"no roles":              {stubAuthenticator{principal: Principal{Subject: testSubject}}, AuditorRole, http.StatusForbidden},
+		"unauthenticated":       {stubAuthenticator{err: ErrUnauthenticated}, AuditorRole, http.StatusUnauthorized},
+		"authenticator forbids": {stubAuthenticator{err: ErrForbidden}, AuditorRole, http.StatusForbidden},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			RequireRole(test.authenticator, test.role, ok).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/cvff/reports/dual-ledger", nil))
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+		})
 	}
 }
 

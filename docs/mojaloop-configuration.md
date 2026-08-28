@@ -21,6 +21,7 @@ The adapter configuration is for the future participant runtime. It is intention
 | `MOJALOOP_CALLBACK_BASE_URL` | Yes | Approved HTTPS callback ingress base URL registered with the partner/switch. |
 | `MOJALOOP_FSPIOP_SOURCE` | Yes | Ministry-approved source participant identifier. |
 | `MOJALOOP_FSPIOP_DESTINATION` | Yes | Approved destination participant/switch identifier for the profile. |
+| `MOJALOOP_MODE` | Yes | Explicit rail posture: `receive-only` or `full`; unset or any other value fails startup. `receive-only` durably handles inbound signed transfer callbacks; authenticated `PUT /quotes/{id}` callbacks get a truthful 501 problem document. `full` is refused at startup until the outbound quote/transfer leg is implemented (see README "Mojaloop rail posture"). |
 | `MOJALOOP_SIGNING_KEY_FILE` | Yes | Runtime-mounted private-key file; never committed or placed in an evidence attachment. |
 | `MOJALOOP_SIGNING_KID` | Yes | Registered key identifier used for rotation and callback trust. |
 | `MOJALOOP_SIGNATURE_ALGORITHM` | Yes | `RS256`, `RS384` or `RS512`; the selected scheme allowlist must be approved. The local example defaults to `RS256`, but it does not create a key or endpoint. |

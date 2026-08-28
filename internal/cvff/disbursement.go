@@ -71,15 +71,21 @@ type DualLedgerReport struct {
 }
 
 // DualLedgerReport joins applications with their disbursement legs so auditors
-// see the NGN custodial fee and the FX-adjusted USD cost side by side.
-func (store *Store) DualLedgerReport(ctx context.Context) ([]DualLedgerReport, error) {
+// see the NGN custodial fee and the FX-adjusted USD cost side by side. The
+// report window is mandatory and half-open [from, to) on the leg timestamp;
+// an absent or inverted window is a hard error, never a silent full scan.
+func (store *Store) DualLedgerReport(ctx context.Context, from, to time.Time) ([]DualLedgerReport, error) {
+	if from.IsZero() || to.IsZero() || !from.Before(to) {
+		return nil, errors.New("dual-ledger report window must be a non-empty [from, to) range")
+	}
 	rows, err := store.pool.Query(ctx, `
 		SELECT a.application_id, a.beneficiary_id, a.state,
 			l.fee_ngn_minor, l.cost_usd_minor, l.cost_ngn_equivalent, l.ngn_per_usd_micro,
 			l.fee_transfer_id, l.cost_transfer_id, l.created_at
 		FROM cvff_disbursement_legs l
 		JOIN cvff_applications a ON a.application_id = l.application_id
-		ORDER BY l.created_at`)
+		WHERE l.created_at >= $1 AND l.created_at < $2
+		ORDER BY l.created_at`, from.UTC(), to.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("dual-ledger report: %w", err)
 	}

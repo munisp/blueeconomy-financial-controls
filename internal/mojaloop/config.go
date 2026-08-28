@@ -12,10 +12,24 @@ import (
 	"time"
 )
 
+// Rail operating modes for MOJALOOP_MODE. The mode is mandatory so the
+// adapter's posture is always explicit, never assumed.
+const (
+	// ModeReceiveOnly durably handles inbound signed transfer callbacks only;
+	// the outbound quote/transfer leg is not implemented and quote callbacks
+	// are authenticated, then answered with a truthful 501 problem document.
+	ModeReceiveOnly = "receive-only"
+	// ModeFull is reserved for the outbound quote -> transfer leg. It is
+	// parsed but the adapter refuses to start with it until the outbound leg
+	// is implemented (fail-closed, never a silent no-op).
+	ModeFull = "full"
+)
+
 type Config struct {
 	BaseURL                    *url.URL
 	Source                     string
 	Destination                string
+	Mode                       string
 	SigningKeyFile             string
 	SigningKeyID               string
 	VerificationKeyFile        string
@@ -23,6 +37,7 @@ type Config struct {
 	SignatureAlgorithm         string
 	CallbackBaseURL            *url.URL
 	CallbackTransferPathPrefix string
+	CallbackQuotePathPrefix    string
 	CABundleFile               string
 	RequestTimeout             time.Duration
 }
@@ -40,7 +55,11 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	callbackTransferPathPrefix, err := callbackTransferPathPrefix(callbackURL)
+	callbackTransferPathPrefix, err := callbackResourcePathPrefix(callbackURL, "transfers")
+	if err != nil {
+		return Config{}, err
+	}
+	callbackQuotePathPrefix, err := callbackResourcePathPrefix(callbackURL, "quotes")
 	if err != nil {
 		return Config{}, err
 	}
@@ -48,6 +67,7 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 		BaseURL:                    baseURL,
 		Source:                     getenv("MOJALOOP_FSPIOP_SOURCE"),
 		Destination:                getenv("MOJALOOP_FSPIOP_DESTINATION"),
+		Mode:                       getenv("MOJALOOP_MODE"),
 		SigningKeyFile:             strings.TrimSpace(getenv("MOJALOOP_SIGNING_KEY_FILE")),
 		SigningKeyID:               getenv("MOJALOOP_SIGNING_KID"),
 		VerificationKeyFile:        strings.TrimSpace(getenv("MOJALOOP_VERIFICATION_KEY_FILE")),
@@ -55,7 +75,11 @@ func LoadConfigFrom(getenv func(string) string) (Config, error) {
 		SignatureAlgorithm:         strings.TrimSpace(getenv("MOJALOOP_SIGNATURE_ALGORITHM")),
 		CallbackBaseURL:            callbackURL,
 		CallbackTransferPathPrefix: callbackTransferPathPrefix,
+		CallbackQuotePathPrefix:    callbackQuotePathPrefix,
 		CABundleFile:               strings.TrimSpace(getenv("MOJALOOP_CA_BUNDLE_FILE")),
+	}
+	if config.Mode != ModeReceiveOnly && config.Mode != ModeFull {
+		return Config{}, fmt.Errorf("MOJALOOP_MODE is required and must be %q or %q", ModeReceiveOnly, ModeFull)
 	}
 	if config.Source == "" || config.Destination == "" || config.SigningKeyFile == "" || config.SigningKeyID == "" || config.CABundleFile == "" {
 		return Config{}, errors.New("Mojaloop source, destination, signing key file, signing kid and CA bundle file are required")
@@ -115,7 +139,9 @@ func requiredHTTPSURL(getenv func(string) string, name string) (*url.URL, error)
 	return parsed, nil
 }
 
-func callbackTransferPathPrefix(callbackURL *url.URL) (string, error) {
+// callbackResourcePathPrefix derives the callback route prefix for one FSPIOP
+// resource (transfers or quotes) from the approved callback base URL.
+func callbackResourcePathPrefix(callbackURL *url.URL, resource string) (string, error) {
 	if callbackURL.RawQuery != "" || callbackURL.Fragment != "" {
 		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL must not contain query or fragment")
 	}
@@ -124,13 +150,13 @@ func callbackTransferPathPrefix(callbackURL *url.URL) (string, error) {
 		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL must not contain traversal")
 	}
 	if base == "" || base == "/" {
-		return "/transfers/", nil
+		return "/" + resource + "/", nil
 	}
 	cleaned := path.Clean(base)
 	if !strings.HasPrefix(cleaned, "/") || cleaned == "." || cleaned == "/" {
 		return "", errors.New("MOJALOOP_CALLBACK_BASE_URL path is invalid")
 	}
-	return cleaned + "/transfers/", nil
+	return cleaned + "/" + resource + "/", nil
 }
 
 func ValidateCABundle(pemBytes []byte) error {

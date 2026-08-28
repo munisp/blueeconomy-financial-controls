@@ -15,19 +15,31 @@ type Config struct {
 	Keycloak    KeycloakConfig
 	Limits      Limits
 	AVScanURL   string
+	Temporal    TemporalConfig
+}
+
+// TemporalConfig carries the fail-closed coordinates cvff-api uses to start
+// CVFFDisbursementWorkflow instances for newly recorded applications.
+type TemporalConfig struct {
+	HostPort  string
+	Namespace string
+	TaskQueue string
 }
 
 // Environment variable names for the service-level coordinates.
 const (
-	EnvListenAddr      = "CVFF_API_LISTEN_ADDR"
-	EnvDatabaseURL     = "DATABASE_URL"
-	EnvKeycloakIssuer  = "CVFF_API_KEYCLOAK_ISSUER"
-	EnvKeycloakJWKS    = "CVFF_API_KEYCLOAK_JWKS_URL"
-	EnvJWTAudience     = "CVFF_API_JWT_AUDIENCE"
-	EnvAVScanURL       = "CVFF_API_AVSCAN_URL"
-	EnvMaxDocBytes     = "CVFF_API_MAX_DOCUMENT_BYTES"
-	EnvMaxDocsPerApp   = "CVFF_API_MAX_DOCUMENTS_PER_APPLICATION"
-	EnvDocContentTypes = "CVFF_API_DOCUMENT_CONTENT_TYPES"
+	EnvListenAddr        = "CVFF_API_LISTEN_ADDR"
+	EnvDatabaseURL       = "DATABASE_URL"
+	EnvKeycloakIssuer    = "CVFF_API_KEYCLOAK_ISSUER"
+	EnvKeycloakJWKS      = "CVFF_API_KEYCLOAK_JWKS_URL"
+	EnvJWTAudience       = "CVFF_API_JWT_AUDIENCE"
+	EnvAVScanURL         = "CVFF_API_AVSCAN_URL"
+	EnvMaxDocBytes       = "CVFF_API_MAX_DOCUMENT_BYTES"
+	EnvMaxDocsPerApp     = "CVFF_API_MAX_DOCUMENTS_PER_APPLICATION"
+	EnvDocContentTypes   = "CVFF_API_DOCUMENT_CONTENT_TYPES"
+	EnvTemporalHostPort  = "TEMPORAL_HOST_PORT"
+	EnvTemporalNamespace = "TEMPORAL_NAMESPACE"
+	EnvTemporalTaskQueue = "TEMPORAL_TASK_QUEUE"
 )
 
 // ConfigFromEnv resolves and validates the service configuration, failing
@@ -56,6 +68,9 @@ func ConfigFromEnv(lookup func(string) string) (Config, error) {
 	config.Keycloak.JWKSURL = require(EnvKeycloakJWKS)
 	config.Keycloak.Audience = require(EnvJWTAudience)
 	config.AVScanURL = require(EnvAVScanURL)
+	config.Temporal.HostPort = require(EnvTemporalHostPort)
+	config.Temporal.Namespace = require(EnvTemporalNamespace)
+	config.Temporal.TaskQueue = require(EnvTemporalTaskQueue)
 	if err != nil {
 		return Config{}, err
 	}

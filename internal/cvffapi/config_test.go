@@ -12,15 +12,18 @@ import (
 
 func validConfigEnv() map[string]string {
 	return map[string]string{
-		EnvListenAddr:      "0.0.0.0:8443",
-		EnvDatabaseURL:     "postgres://cvff:secret@postgres:5432/cvff",
-		EnvKeycloakIssuer:  "https://keycloak.example/realms/blueeconomy-cvff",
-		EnvKeycloakJWKS:    "https://keycloak.example/realms/blueeconomy-cvff/protocol/openid-connect/certs",
-		EnvJWTAudience:     "beneficiary-portal",
-		EnvAVScanURL:       "https://avscan.cluster.local/scan",
-		EnvMaxDocBytes:     "10485760",
-		EnvMaxDocsPerApp:   "12",
-		EnvDocContentTypes: "application/pdf,image/png,image/jpeg",
+		EnvListenAddr:        "0.0.0.0:8443",
+		EnvDatabaseURL:       "postgres://cvff:secret@postgres:5432/cvff",
+		EnvKeycloakIssuer:    "https://keycloak.example/realms/blueeconomy-cvff",
+		EnvKeycloakJWKS:      "https://keycloak.example/realms/blueeconomy-cvff/protocol/openid-connect/certs",
+		EnvJWTAudience:       "beneficiary-portal",
+		EnvAVScanURL:         "https://avscan.cluster.local/scan",
+		EnvMaxDocBytes:       "10485760",
+		EnvMaxDocsPerApp:     "12",
+		EnvDocContentTypes:   "application/pdf,image/png,image/jpeg",
+		EnvTemporalHostPort:  "temporal:7233",
+		EnvTemporalNamespace: "blueeconomy",
+		EnvTemporalTaskQueue: "cvff-disbursement",
 	}
 }
 
@@ -42,6 +45,7 @@ func TestConfigFromEnvFailClosed(t *testing.T) {
 	for _, name := range []string{
 		EnvListenAddr, EnvDatabaseURL, EnvKeycloakIssuer, EnvKeycloakJWKS, EnvJWTAudience,
 		EnvAVScanURL, EnvMaxDocBytes, EnvMaxDocsPerApp, EnvDocContentTypes,
+		EnvTemporalHostPort, EnvTemporalNamespace, EnvTemporalTaskQueue,
 	} {
 		env := validConfigEnv()
 		delete(env, name)

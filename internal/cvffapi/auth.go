@@ -20,13 +20,18 @@ import (
 // realm to use the beneficiary API.
 const BeneficiaryRole = "beneficiary"
 
+// AuditorRole is the approved realm role a caller must hold in the CVFF realm
+// to read the auditor-facing dual-ledger disbursement report. GitOps must
+// provision this realm role and bind it only to auditor identities.
+const AuditorRole = "auditor"
+
 var (
 	// ErrUnauthenticated marks a missing, malformed or unverifiable bearer
 	// token. It maps to HTTP 401.
 	ErrUnauthenticated = errors.New("bearer token is absent or unverifiable")
-	// ErrForbidden marks a verified token without the required beneficiary
-	// realm role. It maps to HTTP 403.
-	ErrForbidden = errors.New("bearer token does not hold the beneficiary role")
+	// ErrForbidden marks a verified token without the realm role the route
+	// requires. It maps to HTTP 403.
+	ErrForbidden = errors.New("bearer token does not hold the required realm role")
 )
 
 // Principal is the verified identity behind one request. Subject is the
@@ -202,8 +207,8 @@ func (authenticator *KeycloakAuthenticator) keyFor(ctx context.Context, keyID st
 }
 
 // Authenticate verifies the bearer token: RS256 signature against the realm
-// JWKS, exact issuer, expiry, approved audience and the beneficiary realm
-// role. Any gap fails closed.
+// JWKS, exact issuer, expiry and approved audience. Realm-role authorization
+// is enforced per route by RequireRole; any verification gap fails closed.
 func (authenticator *KeycloakAuthenticator) Authenticate(ctx context.Context, authorizationHeader string) (Principal, error) {
 	if !strings.HasPrefix(authorizationHeader, "Bearer ") {
 		return Principal{}, ErrUnauthenticated
@@ -246,11 +251,7 @@ func (authenticator *KeycloakAuthenticator) Authenticate(ctx context.Context, au
 	if !audienceOK {
 		return Principal{}, fmt.Errorf("%w: token is not issued for this API audience", ErrUnauthenticated)
 	}
-	principal := Principal{Subject: claims.Subject, Roles: append([]string(nil), claims.RealmAccess.Roles...)}
-	if !principal.hasRole(BeneficiaryRole) {
-		return Principal{}, ErrForbidden
-	}
-	return principal, nil
+	return Principal{Subject: claims.Subject, Roles: append([]string(nil), claims.RealmAccess.Roles...)}, nil
 }
 
 func (principal Principal) hasRole(role string) bool {
@@ -266,17 +267,30 @@ func (principal Principal) hasRole(role string) bool {
 // context.
 type principalContextKey struct{}
 
-// RequireAuth wraps one handler with bearer verification. 401 marks an
-// unverifiable token, 403 a verified token without the beneficiary role.
+// RequireAuth wraps one handler with bearer verification and the beneficiary
+// realm-role check. 401 marks an unverifiable token, 403 a verified token
+// without the beneficiary role.
 func RequireAuth(authenticator Authenticator, next http.Handler) http.Handler {
+	return RequireRole(authenticator, BeneficiaryRole, next)
+}
+
+// RequireRole wraps one handler with bearer verification and enforces one
+// approved realm role. 401 marks an unverifiable token, 403 a verified token
+// without the required role; the role is named only in generic terms so the
+// response does not leak authorization policy detail.
+func RequireRole(authenticator Authenticator, role string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		principal, err := authenticator.Authenticate(request.Context(), request.Header.Get("Authorization"))
 		if err != nil {
 			if errors.Is(err, ErrForbidden) {
-				writeProblem(writer, http.StatusForbidden, "The authenticated identity does not hold the beneficiary role.", nil)
+				writeProblem(writer, http.StatusForbidden, "The authenticated identity does not hold the required role.", nil)
 				return
 			}
 			writeProblem(writer, http.StatusUnauthorized, "A valid bearer token is required.", nil)
+			return
+		}
+		if !principal.hasRole(role) {
+			writeProblem(writer, http.StatusForbidden, "The authenticated identity does not hold the required role.", nil)
 			return
 		}
 		ctx := context.WithValue(request.Context(), principalContextKey{}, principal)

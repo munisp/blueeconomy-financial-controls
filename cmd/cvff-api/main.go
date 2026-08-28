@@ -17,6 +17,7 @@ import (
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
+	temporalclient "go.temporal.io/sdk/client"
 )
 
 func main() {
@@ -51,7 +52,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler, err := cvffapi.NewHandler(store, authenticator, blobs, scanner, config.Limits)
+	temporalClient, err := temporalclient.Dial(temporalclient.Options{
+		HostPort:  config.Temporal.HostPort,
+		Namespace: config.Temporal.Namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("dial Temporal: %w", err)
+	}
+	defer temporalClient.Close()
+	starter, err := cvffapi.NewTemporalStarter(temporalClient, config.Temporal.TaskQueue)
+	if err != nil {
+		return err
+	}
+	handler, err := cvffapi.NewHandler(store, authenticator, blobs, scanner, config.Limits, starter)
 	if err != nil {
 		return err
 	}

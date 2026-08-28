@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,6 +31,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Fail-closed posture gate: the outbound quote/transfer leg is not
+	// implemented, so `full` mode is refused explicitly rather than silently
+	// running receive-only under a `full` label. See README "Mojaloop rail
+	// posture" for exactly what `full` still requires.
+	if config.Mode == mojaloop.ModeFull {
+		return errors.New("MOJALOOP_MODE=full is not supported yet: the outbound quote/transfer leg is unimplemented; run MOJALOOP_MODE=receive-only")
+	}
+	log.Printf("mojaloop-adapter: MOJALOOP_MODE=%s — inbound signed transfer callbacks only; outbound quote/transfer leg disabled; PUT %s{id} is authenticated then answered 501", config.Mode, config.CallbackQuotePathPrefix)
 	privateKeyBytes, err := os.ReadFile(config.SigningKeyFile)
 	if err != nil {
 		return fmt.Errorf("read signing key: %w", err)
@@ -86,9 +96,20 @@ func run() error {
 	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
 	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
+	quoteHandler := mojaloop.QuoteCallbackHandler{VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedQuotePathPrefix: config.CallbackQuotePathPrefix}
 	mux := http.NewServeMux()
 	mux.Handle(config.CallbackTransferPathPrefix, handler)
-	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) { response.WriteHeader(http.StatusNoContent) })
+	mux.Handle(config.CallbackQuotePathPrefix, quoteHandler)
+	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
+		// The health payload reports the configured rail posture so operators
+		// can observe the receive-only mode, not just process liveness.
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(response).Encode(struct {
+			Status string `json:"status"`
+			Mode   string `json:"mode"`
+		}{Status: "ok", Mode: config.Mode})
+	})
 	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

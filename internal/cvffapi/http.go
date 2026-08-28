@@ -30,6 +30,9 @@ type Store interface {
 	ListApprovals(ctx context.Context, applicationID string) ([]cvff.Approval, error)
 	CreateDocument(ctx context.Context, document cvff.Document) (cvff.Document, error)
 	ListDocuments(ctx context.Context, applicationID string) ([]cvff.Document, error)
+	// DualLedgerReport is the auditor-facing NGN/USD disbursement report over
+	// the mandatory half-open window [from, to).
+	DualLedgerReport(ctx context.Context, from, to time.Time) ([]cvff.DualLedgerReport, error)
 }
 
 // Limits carries the approved upload quota and content rules. Every value is
@@ -60,18 +63,20 @@ func (limits Limits) validate() error {
 
 var contentTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$`)
 
-// Handler implements the CVFF beneficiary contract under /v1/cvff.
+// Handler implements the CVFF beneficiary contract under /v1/cvff plus the
+// auditor-facing dual-ledger report under /v1/cvff/reports.
 type Handler struct {
 	store   Store
 	blobs   BlobStore
 	scanner Scanner
 	limits  Limits
+	starter WorkflowStarter
 	mux     *http.ServeMux
 }
 
 // NewHandler fails closed when any dependency is absent: there is no
-// default store, storage backend, scanner or quota.
-func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scanner Scanner, limits Limits) (*Handler, error) {
+// default store, storage backend, scanner, quota or workflow starter.
+func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scanner Scanner, limits Limits, starter WorkflowStarter) (*Handler, error) {
 	if store == nil {
 		return nil, errors.New("cvff store is required")
 	}
@@ -84,10 +89,13 @@ func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scann
 	if scanner == nil {
 		return nil, errors.New("malware scanner is required; uploads are rejected without one")
 	}
+	if starter == nil {
+		return nil, errors.New("workflow starter is required; applications must enter the disbursement rail")
+	}
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	handler := &Handler{store: store, blobs: blobs, scanner: scanner, limits: limits, mux: http.NewServeMux()}
+	handler := &Handler{store: store, blobs: blobs, scanner: scanner, limits: limits, starter: starter, mux: http.NewServeMux()}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /v1/cvff/applications", handler.listApplications)
 	api.HandleFunc("POST /v1/cvff/applications", handler.createApplication)
@@ -95,7 +103,10 @@ func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scann
 	api.HandleFunc("GET /v1/cvff/applications/{application_id}/events", handler.listEvents)
 	api.HandleFunc("GET /v1/cvff/applications/{application_id}/documents", handler.listDocuments)
 	api.HandleFunc("POST /v1/cvff/applications/{application_id}/documents", handler.uploadDocument)
+	auditorAPI := http.NewServeMux()
+	auditorAPI.HandleFunc("GET /v1/cvff/reports/dual-ledger", handler.dualLedgerReport)
 	handler.mux.HandleFunc("GET /healthz", handler.health)
+	handler.mux.Handle("/v1/cvff/reports/", RequireRole(authenticator, AuditorRole, auditorAPI))
 	handler.mux.Handle("/", RequireAuth(authenticator, api))
 	return handler, nil
 }
@@ -246,6 +257,14 @@ func (handler *Handler) createApplication(writer http.ResponseWriter, request *h
 		default:
 			writeProblem(writer, http.StatusInternalServerError, "The application could not be recorded.", nil)
 		}
+		return
+	}
+	// Enter the disbursement rail. The starter is idempotent (an already
+	// running workflow for the application is success), so idempotent intake
+	// replays also re-drive the start: a submission that failed to start its
+	// workflow heals on the client's retry with the same Idempotency-Key.
+	if err := handler.starter.StartDisbursement(request.Context(), retained.ApplicationID); err != nil {
+		writeProblem(writer, http.StatusServiceUnavailable, "The application was recorded but the disbursement workflow could not be started; retry with the same Idempotency-Key.", nil)
 		return
 	}
 	writeJSON(writer, http.StatusCreated, detailOf(retained))

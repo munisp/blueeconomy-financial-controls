@@ -32,6 +32,31 @@ type fakeStore struct {
 	submitErr    error
 	documentErr  error
 	createdDocs  []cvff.Document
+	report       []cvff.DualLedgerReport
+	reportErr    error
+	reportFrom   time.Time
+	reportTo     time.Time
+}
+
+func (store *fakeStore) DualLedgerReport(_ context.Context, from, to time.Time) ([]cvff.DualLedgerReport, error) {
+	store.reportFrom, store.reportTo = from, to
+	if store.reportErr != nil {
+		return nil, store.reportErr
+	}
+	return store.report, nil
+}
+
+type fakeStarter struct {
+	started []string
+	err     error
+}
+
+func (starter *fakeStarter) StartDisbursement(_ context.Context, applicationID string) error {
+	if starter.err != nil {
+		return starter.err
+	}
+	starter.started = append(starter.started, applicationID)
+	return nil
 }
 
 func (store *fakeStore) SubmitIntake(_ context.Context, intake cvff.Intake) (cvff.ApplicationDetail, error) {
@@ -164,9 +189,14 @@ func testLimits() Limits {
 
 func newTestHandler(t *testing.T, store *fakeStore, blobs *fakeBlobs, scanner Scanner) http.Handler {
 	t.Helper()
+	return newTestHandlerWithStarter(t, store, blobs, scanner, &fakeStarter{})
+}
+
+func newTestHandlerWithStarter(t *testing.T, store *fakeStore, blobs *fakeBlobs, scanner Scanner, starter WorkflowStarter) http.Handler {
+	t.Helper()
 	handler, err := NewHandler(store,
 		stubAuthenticator{principal: Principal{Subject: testSubject, Roles: []string{BeneficiaryRole}}},
-		blobs, scanner, testLimits())
+		blobs, scanner, testLimits(), starter)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -204,20 +234,23 @@ func TestNewHandlerFailClosed(t *testing.T) {
 	store := &fakeStore{}
 	blobs := &fakeBlobs{puts: map[string][]byte{}}
 	auth := stubAuthenticator{principal: Principal{Subject: testSubject}}
-	if _, err := NewHandler(nil, auth, blobs, fakeScanner{}, testLimits()); err == nil {
+	if _, err := NewHandler(nil, auth, blobs, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
 		t.Fatal("nil store accepted")
 	}
-	if _, err := NewHandler(store, nil, blobs, fakeScanner{}, testLimits()); err == nil {
+	if _, err := NewHandler(store, nil, blobs, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
 		t.Fatal("nil authenticator accepted")
 	}
-	if _, err := NewHandler(store, auth, nil, fakeScanner{}, testLimits()); err == nil {
+	if _, err := NewHandler(store, auth, nil, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
 		t.Fatal("nil blob store accepted")
 	}
-	if _, err := NewHandler(store, auth, blobs, nil, testLimits()); err == nil {
+	if _, err := NewHandler(store, auth, blobs, nil, testLimits(), &fakeStarter{}); err == nil {
 		t.Fatal("nil scanner accepted")
 	}
-	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, Limits{}); err == nil {
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, Limits{}, &fakeStarter{}); err == nil {
 		t.Fatal("empty limits accepted")
+	}
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, testLimits(), nil); err == nil {
+		t.Fatal("nil workflow starter accepted")
 	}
 }
 

@@ -30,7 +30,7 @@ paths:
         '403': {description: Token without the beneficiary realm role.}
     post:
       operationId: createCvffApplication
-      description: Creates one application in SUBMITTED state and emits the cvff.application.submitted outbox event. The Idempotency-Key header binds retries; replay with identical content returns the original, divergent content is a 409.
+      description: Creates one application in SUBMITTED state, emits the cvff.application.submitted outbox event and starts the Temporal CVFFDisbursementWorkflow for the application (idempotent workflow ID; an already-running execution is success). The Idempotency-Key header binds retries; replay with identical content returns the original, divergent content is a 409.
       security: [{bearerAuth: []}]
       parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationCreate'}}}}
@@ -42,6 +42,7 @@ paths:
         '422':
           description: Field-level rejection.
           content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+        '503': {description: Application recorded but the disbursement workflow could not be started; retry with the same Idempotency-Key.}
   /v1/cvff/applications/{application_id}:
     get:
       operationId: getCvffApplication
@@ -102,6 +103,38 @@ paths:
         '413': {description: File exceeds the approved size limit.}
         '422': {description: Unapproved document type, content type, empty file or infected content.}
         '503': {description: Malware scanner unavailable; upload refused (fail closed).}
+  /v1/cvff/reports/dual-ledger:
+    get:
+      operationId: getCvffDualLedgerReport
+      description: Auditor-facing NGN/USD dual-ledger disbursement report over the mandatory half-open window [from, to) on the disbursement-leg timestamp. Requires a Keycloak bearer token from the blueeconomy-cvff realm holding the auditor realm role.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: from, in: query, required: true, schema: {type: string, format: date-time}, description: Window start (RFC 3339, inclusive).}
+        - {name: to, in: query, required: true, schema: {type: string, format: date-time}, description: Window end (RFC 3339, exclusive); the window may span at most 366 days.}
+        - {name: format, in: query, required: false, schema: {type: string, enum: [json, csv], default: json}}
+      responses:
+        '200':
+          description: Dual-ledger report rows in disbursement order.
+          content:
+            application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffDualLedgerReport'}}}
+            text/csv: {schema: {type: string}}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the auditor realm role.}
+        '422':
+          description: Missing, malformed, inverted or over-wide window, or unapproved format.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+  /v1/mojaloop/quotes/{quote_id}:
+    put:
+      operationId: receiveMojaloopQuoteCallback
+      description: The rail runs receive-only (MOJALOOP_MODE=receive-only); the outbound quote/transfer leg is not implemented. The callback FSPIOP JWS signature and participant headers are verified exactly like the transfer callback, then a truthful 501 problem document is returned.
+      parameters: [{$ref: '#/components/parameters/QuoteID'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses:
+        '401': {description: Missing or invalid FSPIOP signature.}
+        '403': {description: Unexpected FSPIOP source or destination.}
+        '501':
+          description: Quote callbacks are not processed in receive-only mode.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
   /v1/mojaloop/transfers/{transfer_id}:
     put:
       operationId: receiveMojaloopTransferCallback
@@ -115,6 +148,7 @@ components:
   parameters:
     IntentID: {name: intent_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
     TransferID: {name: transfer_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    QuoteID: {name: quote_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
     ApplicationID: {name: application_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
     IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
   schemas:
@@ -184,6 +218,20 @@ components:
         from_state: {$ref: '#/components/schemas/CvffState'}
         to_state: {$ref: '#/components/schemas/CvffState'}
         created_at: {type: string, format: date-time}
+    CvffDualLedgerReport:
+      type: object
+      required: [application_id, beneficiary_id, state, fee_ngn_minor, cost_usd_minor, cost_ngn_equivalent, ngn_per_usd_micro, fee_transfer_id, cost_transfer_id, disbursed_at]
+      properties:
+        application_id: {type: string}
+        beneficiary_id: {type: string}
+        state: {$ref: '#/components/schemas/CvffState'}
+        fee_ngn_minor: {type: integer, description: NGN custodial fee leg in minor units.}
+        cost_usd_minor: {type: integer, description: USD cost leg in minor units.}
+        cost_ngn_equivalent: {type: integer, description: FX-adjusted NGN equivalent of the USD cost leg.}
+        ngn_per_usd_micro: {type: integer, description: CBN reference rate, fixed-point micro scale.}
+        fee_transfer_id: {type: string}
+        cost_transfer_id: {type: string}
+        disbursed_at: {type: string, format: date-time}
     CvffUploadedDocument:
       type: object
       required: [document_id, application_id, document_type, file_name, content_type, size_bytes, uploaded_at]
