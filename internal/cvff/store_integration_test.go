@@ -5,6 +5,7 @@ package cvff
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -162,8 +163,17 @@ func TestRealPostgresProductionWiring(t *testing.T) {
 	}
 
 	// Disbursement legs persist the conversion basis with rate + timestamps.
+	// The legs reference a dual-control-confirmed CBN rate row (rate_id is a
+	// UUID FK to fx_rates), so seed the confirmed rate first.
+	const seedRateID = "00000000-0000-4000-8000-0000000000a1"
+	if err := store.Exec(ctx, fmt.Sprintf(`INSERT INTO fx_rates
+		(rate_id, base_currency, quote_currency, ngn_per_usd_micro, effective_date, maker, checker, state, created_at, confirmed_at)
+		VALUES ('%s', 'USD', 'NGN', 1550250000, '%s', 'kc-maker-1', 'kc-checker-1', 'CONFIRMED', now(), now())`,
+		seedRateID, rateDate().Format("2006-01-02"))); err != nil {
+		t.Fatalf("seed confirmed CBN rate: %v", err)
+	}
 	legs := DisbursementLegs{
-		ApplicationID: application.ApplicationID, RateID: "rate-1", NGNPerUSDMicro: 1_550_250_000,
+		ApplicationID: application.ApplicationID, RateID: seedRateID, NGNPerUSDMicro: 1_550_250_000,
 		RateEffectiveDate: rateDate(), FeeTransferID: "fee-t-1", CostTransferID: "cost-t-1",
 		FeeNGNMinor: 2_712_937_500, CostUSDMinor: 700_000_000, CostNGNEquivalent: 1_085_175_000_000,
 	}
