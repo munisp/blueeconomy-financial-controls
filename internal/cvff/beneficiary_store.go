@@ -75,8 +75,16 @@ func (store *Store) SubmitIntake(ctx context.Context, intake Intake) (Applicatio
 		intake.BusinessName, intake.BusinessRCNumber, intake.BusinessAddress))
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "cvff_applications_external_ref_key" {
-			return store.replayIntake(ctx, intake)
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			switch pgErr.ConstraintName {
+			case "cvff_applications_external_ref_key":
+				return store.replayIntake(ctx, intake)
+			case "cvff_applications_pkey":
+				// A genuine client retry carries the same application_id AND the
+				// same idempotency key; PostgreSQL may raise the primary-key
+				// violation before the external_ref one, so resolve it here too.
+				return store.replayIntakeByID(ctx, intake)
+			}
 		}
 		return ApplicationDetail{}, fmt.Errorf("insert cvff intake: %w", err)
 	}
@@ -117,6 +125,39 @@ func (store *Store) replayIntake(ctx context.Context, intake Intake) (Applicatio
 		existing.BusinessRCNumber != intake.BusinessRCNumber ||
 		existing.BusinessAddress != intake.BusinessAddress {
 		return ApplicationDetail{}, fmt.Errorf("%w: idempotency key was already used with different content", ErrConflict)
+	}
+	return existing, nil
+}
+
+// replayIntakeByID resolves a primary-key replay: the retried submission
+// carries the same application_id. It is the originally persisted application
+// only when the idempotency key and every content field also match; any
+// divergence is a hard conflict (never a silent merge).
+func (store *Store) replayIntakeByID(ctx context.Context, intake Intake) (ApplicationDetail, error) {
+	existing, err := scanApplicationDetail(store.pool.QueryRow(ctx, `
+		SELECT `+applicationDetailColumns+`, `+stateEnteredAtExpression+`
+		FROM cvff_applications WHERE application_id = $1`, intake.ApplicationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ApplicationDetail{}, fmt.Errorf("replay cvff intake by id: %w", ErrNotFound)
+	}
+	if err != nil {
+		return ApplicationDetail{}, fmt.Errorf("replay cvff intake by id: %w", err)
+	}
+	if existing.ExternalRef != intake.IdempotencyKey {
+		return ApplicationDetail{}, fmt.Errorf("%w: application id was already used with a different idempotency key", ErrConflict)
+	}
+	if existing.BeneficiaryID != intake.BeneficiaryID ||
+		existing.VesselName != intake.VesselName ||
+		existing.IMONumber != intake.IMONumber ||
+		existing.OfficialNumber != intake.OfficialNumber ||
+		existing.VesselClass != intake.VesselClass ||
+		existing.CabotageRoute != intake.CabotageRoute ||
+		existing.Amount != intake.Amount ||
+		existing.Currency != intake.Currency ||
+		existing.BusinessName != intake.BusinessName ||
+		existing.BusinessRCNumber != intake.BusinessRCNumber ||
+		existing.BusinessAddress != intake.BusinessAddress {
+		return ApplicationDetail{}, fmt.Errorf("%w: application id was already used with different content", ErrConflict)
 	}
 	return existing, nil
 }
