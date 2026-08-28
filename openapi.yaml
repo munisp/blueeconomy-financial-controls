@@ -17,6 +17,91 @@ paths:
       parameters: [{$ref: '#/components/parameters/IntentID'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
       responses: {'200': {description: Intent approved.}, '409': {description: Version or maker/checker conflict.}}
+  /v1/cvff/applications:
+    get:
+      operationId: listCvffApplications
+      description: Lists the authenticated beneficiary's own applications, newest first. Requires a Keycloak bearer token from the blueeconomy-cvff realm holding the beneficiary role.
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Own applications.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffApplicationSummary'}}}}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the beneficiary realm role.}
+    post:
+      operationId: createCvffApplication
+      description: Creates one application in SUBMITTED state and emits the cvff.application.submitted outbox event. The Idempotency-Key header binds retries; replay with identical content returns the original, divergent content is a 409.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationCreate'}}}}
+      responses:
+        '201':
+          description: Application created (or idempotent replay of the original).
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationDetail'}}}
+        '409': {description: Idempotency key reused with different content.}
+        '422':
+          description: Field-level rejection.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+  /v1/cvff/applications/{application_id}:
+    get:
+      operationId: getCvffApplication
+      description: Returns one own application. Other owners' identifiers fail closed with 404.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Application detail.
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationDetail'}}}
+        '404': {description: Not found or owned by another principal.}
+  /v1/cvff/applications/{application_id}/events:
+    get:
+      operationId: listCvffApplicationEvents
+      description: Immutable decision trail for one own application, in recording order.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Recorded decisions.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffApprovalEvent'}}}}
+        '404': {description: Not found or owned by another principal.}
+  /v1/cvff/applications/{application_id}/documents:
+    get:
+      operationId: listCvffApplicationDocuments
+      description: Document metadata for one own application.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Uploaded documents.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffUploadedDocument'}}}}
+        '404': {description: Not found or owned by another principal.}
+    post:
+      operationId: uploadCvffApplicationDocument
+      description: Multipart upload (document_type field + file part). Bytes are malware-scanned and stored content-addressed in the configured object-storage backend; uploads fail closed without scanner and quota configuration.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ApplicationID'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [document_type, file]
+              properties:
+                document_type: {type: string, enum: [VESSEL_REGISTRATION, CABOTAGE_LICENSE, BANK_DETAILS]}
+                file: {type: string, format: binary}
+      responses:
+        '200': {description: Idempotent replay of the original upload.}
+        '201':
+          description: Document recorded.
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffUploadedDocument'}}}
+        '404': {description: Application not found or owned by another principal.}
+        '409': {description: Document quota reached or idempotency key reused with different content.}
+        '413': {description: File exceeds the approved size limit.}
+        '422': {description: Unapproved document type, content type, empty file or infected content.}
+        '503': {description: Malware scanner unavailable; upload refused (fail closed).}
   /v1/mojaloop/transfers/{transfer_id}:
     put:
       operationId: receiveMojaloopTransferCallback
@@ -25,10 +110,91 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FSPIOPCallback'}}}}
       responses: {'200': {description: Callback persisted or exact terminal replay.}, '409': {description: Callback conflict/regression.}, '422': {description: Signature/profile validation failed.}}
 components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
   parameters:
     IntentID: {name: intent_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
     TransferID: {name: transfer_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    ApplicationID: {name: application_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
   schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        errors:
+          type: object
+          additionalProperties: {type: string}
+          description: Per-field rejections keyed by payload field name.
+    CvffApplicationSummary:
+      type: object
+      required: [application_id, vessel_name, amount, currency, state, state_entered_at, created_at, updated_at]
+      properties:
+        application_id: {type: string}
+        vessel_name: {type: string}
+        amount: {type: integer, description: Minor units (kobo).}
+        currency: {type: string, enum: [NGN]}
+        state: {$ref: '#/components/schemas/CvffState'}
+        state_entered_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CvffApplicationDetail:
+      allOf:
+        - $ref: '#/components/schemas/CvffApplicationSummary'
+        - type: object
+          required: [imo_number, official_number, vessel_class, cabotage_route, business_name, business_rc_number, business_address]
+          properties:
+            imo_number: {type: string, pattern: '^[0-9]{7}$'}
+            official_number: {type: string}
+            vessel_class: {type: string, enum: [FISHING_TRAWLER, CARGO_COASTER, TUG, BARGE, PASSENGER_FERRY, SUPPLY_VESSEL, CREW_BOAT, OTHER]}
+            cabotage_route: {type: string, enum: [LAGOS_PORT_HARCOURT, LAGOS_ONNE, LAGOS_WARRI, LAGOS_CALABAR, PORT_HARCOURT_BONNY, WARRI_ESCRAVOS, INLAND_WATERWAYS, OTHER]}
+            business_name: {type: string}
+            business_rc_number: {type: string}
+            business_address: {type: string}
+    CvffApplicationCreate:
+      type: object
+      additionalProperties: false
+      required: [vessel_name, imo_number, official_number, vessel_class, cabotage_route, amount, currency, business_name, business_rc_number, business_address]
+      properties:
+        vessel_name: {type: string, minLength: 2, maxLength: 128}
+        imo_number: {type: string, pattern: '^[0-9]{7}$', description: Seven-digit IMO number; check digit verified.}
+        official_number: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9/-]{1,31}$'}
+        vessel_class: {type: string, enum: [FISHING_TRAWLER, CARGO_COASTER, TUG, BARGE, PASSENGER_FERRY, SUPPLY_VESSEL, CREW_BOAT, OTHER]}
+        cabotage_route: {type: string, enum: [LAGOS_PORT_HARCOURT, LAGOS_ONNE, LAGOS_WARRI, LAGOS_CALABAR, PORT_HARCOURT_BONNY, WARRI_ESCRAVOS, INLAND_WATERWAYS, OTHER]}
+        amount: {type: integer, minimum: 500000000, maximum: 200000000000, description: Requested amount in kobo.}
+        currency: {type: string, enum: [NGN]}
+        business_name: {type: string, minLength: 2, maxLength: 256}
+        business_rc_number: {type: string, pattern: '^RC[0-9]{4,10}$'}
+        business_address: {type: string, minLength: 8, maxLength: 512}
+    CvffState:
+      type: string
+      enum: [SUBMITTED, UNDERWRITING_PRIMARY, UNDERWRITING_SECONDARY, UNDERWRITING_TERTIARY, NIMASA_APPROVAL, BANK_CONFIRMATION, DISBURSEMENT_PENDING, DISBURSED, AUDITED, REJECTED, RECONCILIATION_REQUIRED]
+    CvffApprovalEvent:
+      type: object
+      required: [approval_id, application_id, role, principal_id, decision, from_state, to_state, created_at]
+      properties:
+        approval_id: {type: string, format: uuid}
+        application_id: {type: string}
+        role: {type: string, enum: [UNDERWRITER_PRIMARY, UNDERWRITER_SECONDARY, UNDERWRITER_TERTIARY, NIMASA_APPROVER, RECEIVING_BANK, BENEFICIARY]}
+        principal_id: {type: string}
+        decision: {type: string, enum: [APPROVE, REJECT]}
+        from_state: {$ref: '#/components/schemas/CvffState'}
+        to_state: {$ref: '#/components/schemas/CvffState'}
+        created_at: {type: string, format: date-time}
+    CvffUploadedDocument:
+      type: object
+      required: [document_id, application_id, document_type, file_name, content_type, size_bytes, uploaded_at]
+      properties:
+        document_id: {type: string, format: uuid}
+        application_id: {type: string}
+        document_type: {type: string, enum: [VESSEL_REGISTRATION, CABOTAGE_LICENSE, BANK_DETAILS]}
+        file_name: {type: string}
+        content_type: {type: string}
+        size_bytes: {type: integer, minimum: 1}
+        uploaded_at: {type: string, format: date-time}
     FinancialIntentCreate:
       type: object
       additionalProperties: false

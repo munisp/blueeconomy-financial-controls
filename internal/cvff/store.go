@@ -81,6 +81,9 @@ func (store *Store) Submit(ctx context.Context, application Application, assignm
 			return Application{}, fmt.Errorf("assign cvff role %s: %w", role, err)
 		}
 	}
+	if err := appendTransition(ctx, tx, retained.ApplicationID, StateSubmitted, StateSubmitted, RoleBeneficiary, application.BeneficiaryID, "cvff.application.submitted", createdAt); err != nil {
+		return Application{}, err
+	}
 	if err := appendEvent(ctx, tx, retained.ApplicationID, "cvff.application.submitted", retained, createdAt); err != nil {
 		return Application{}, err
 	}
@@ -175,6 +178,9 @@ func (store *Store) commitDecision(ctx context.Context, current, updated Applica
 	if err != nil {
 		return Application{}, Approval{}, fmt.Errorf("advance cvff application: %w", err)
 	}
+	if err := appendTransition(ctx, tx, persisted.ApplicationID, persisted.FromState, persisted.ToState, persisted.Role, persisted.PrincipalID, "cvff.decision.recorded", persisted.CreatedAt); err != nil {
+		return Application{}, Approval{}, err
+	}
 	if err := appendEvent(ctx, tx, retained.ApplicationID, "cvff.decision.recorded", persisted, approval.CreatedAt); err != nil {
 		return Application{}, Approval{}, err
 	}
@@ -214,6 +220,9 @@ func (store *Store) Transition(ctx context.Context, applicationID string, expect
 	}
 	if err != nil {
 		return Application{}, fmt.Errorf("transition cvff application: %w", err)
+	}
+	if err := appendTransition(ctx, tx, retained.ApplicationID, current.State, retained.State, workflowActorRole, workflowActorPrincipal, eventType, updatedAt); err != nil {
+		return Application{}, err
 	}
 	if err := appendEvent(ctx, tx, retained.ApplicationID, eventType, retained, updatedAt); err != nil {
 		return Application{}, err
@@ -274,6 +283,26 @@ func (store *Store) ListApprovals(ctx context.Context, applicationID string) ([]
 		return nil, fmt.Errorf("iterate cvff approvals: %w", err)
 	}
 	return approvals, nil
+}
+
+// Non-decision lifecycle moves (underwriting start, audit commit,
+// reconciliation branch) are executed by the Temporal CVFF worker; the
+// transition log attributes them to that service identity.
+const (
+	workflowActorRole      Role   = "CVFF_WORKFLOW"
+	workflowActorPrincipal string = "cvff-worker"
+)
+
+// appendTransition records one durable state-machine move. It is the
+// write-through behind state_entered_at and the observer timeline.
+func appendTransition(ctx context.Context, tx pgx.Tx, applicationID string, fromState State, toState State, actorRole Role, actorPrincipal string, eventType string, createdAt time.Time) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO cvff_transitions (transition_id, application_id, from_state, to_state, actor_role, actor_principal_id, event_type, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		uuid.New(), applicationID, fromState, toState, actorRole, actorPrincipal, eventType, createdAt); err != nil {
+		return fmt.Errorf("write cvff transition: %w", err)
+	}
+	return nil
 }
 
 func appendEvent(ctx context.Context, tx pgx.Tx, applicationID string, eventType string, value any, createdAt time.Time) error {

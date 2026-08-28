@@ -22,7 +22,7 @@ func TestRealPostgresCVFFFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	for _, name := range []string{"0001", "0002", "0003"} {
+	for _, name := range []string{"0001", "0002", "0003", "0004"} {
 		matches, globErr := filepath.Glob(filepath.Join(os.Getenv("MIGRATION_PATH"), name+"_*.sql"))
 		if globErr != nil || len(matches) != 1 {
 			t.Fatalf("locate migration %s: %v", name, globErr)
