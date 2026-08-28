@@ -17,6 +17,7 @@ import (
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
+	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
 	temporalclient "go.temporal.io/sdk/client"
 )
 
@@ -64,7 +65,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	handler, err := cvffapi.NewHandler(store, authenticator, blobs, scanner, config.Limits, starter)
+	signaler, err := cvffapi.NewTemporalSignaler(temporalClient, config.Temporal.TaskQueue)
+	if err != nil {
+		return err
+	}
+	policy, err := pbac.LoadEnforcer(config.PolicyDir)
+	if err != nil {
+		return fmt.Errorf("authorization policy: %w", err)
+	}
+	handler, err := cvffapi.NewHandler(store, authenticator, blobs, scanner, config.Limits, starter, signaler, policy)
 	if err != nil {
 		return err
 	}

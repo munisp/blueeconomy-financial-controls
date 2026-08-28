@@ -2,12 +2,27 @@ package outbox
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+func testSigner(t *testing.T) *EnvelopeSigner {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	signer, err := NewEnvelopeSigner(privateKey, "2026-08")
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	return signer
+}
 
 func sampleEvent() Event {
 	return Event{
@@ -49,19 +64,12 @@ func TestBuildEnvelopeMapping(t *testing.T) {
 	if envelope.Provenance.PrincipalID != "kc-maker" || envelope.Provenance.LedgerCommitHash != "intent-001" {
 		t.Fatalf("provenance: %+v", envelope.Provenance)
 	}
-	if len(envelope.Provenance.Signature) != 64 {
-		t.Fatalf("signature = %q", envelope.Provenance.Signature)
+	// BuildEnvelope never signs: SignEnvelope fills the signature.
+	if envelope.Provenance.Signature != "" {
+		t.Fatalf("unsigned envelope carried signature %q", envelope.Provenance.Signature)
 	}
 	if envelope.Classification != "FIDUCIARY_SEGREGATED" {
 		t.Fatalf("classification = %s", envelope.Classification)
-	}
-	// Deterministic signature over the payload.
-	again, err := BuildEnvelope(sampleEvent())
-	if err != nil {
-		t.Fatalf("rebuild envelope: %v", err)
-	}
-	if again.Provenance.Signature != envelope.Provenance.Signature {
-		t.Fatal("signature is not deterministic")
 	}
 }
 
@@ -126,9 +134,10 @@ func (producer *fakeProducer) Publish(_ context.Context, key, value []byte) erro
 }
 
 func TestDrainPublishesWithIdempotentKeys(t *testing.T) {
+	signer := testSigner(t)
 	source := &fakeSource{events: []Event{sampleEvent()}}
 	producer := &fakeProducer{}
-	published, err := Drain(context.Background(), source, producer, 100)
+	published, err := Drain(context.Background(), source, producer, signer, 100)
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
@@ -145,6 +154,10 @@ func TestDrainPublishesWithIdempotentKeys(t *testing.T) {
 	if envelope.Classification != "FIDUCIARY_SEGREGATED" {
 		t.Fatalf("classification = %s", envelope.Classification)
 	}
+	// The published envelope carries a verifiable Ed25519 JWS signature.
+	if err := VerifyEnvelope(signer.Public(), signer.KeyID(), envelope); err != nil {
+		t.Fatalf("published envelope does not verify: %v", err)
+	}
 	if len(source.marked) != 1 || source.marked[0] != producer.keys[0] {
 		t.Fatalf("marked = %v", source.marked)
 	}
@@ -153,7 +166,7 @@ func TestDrainPublishesWithIdempotentKeys(t *testing.T) {
 func TestDrainFailsClosedOnProducerError(t *testing.T) {
 	source := &fakeSource{events: []Event{sampleEvent()}}
 	producer := &fakeProducer{err: errors.New("kafka unavailable")}
-	published, err := Drain(context.Background(), source, producer, 100)
+	published, err := Drain(context.Background(), source, producer, testSigner(t), 100)
 	if err == nil || !strings.Contains(err.Error(), "kafka unavailable") {
 		t.Fatalf("drain error = %v", err)
 	}
@@ -170,7 +183,7 @@ func TestDrainPartialFailureReportsCount(t *testing.T) {
 	second.EventID = "6f1a2b3c-0000-4000-8000-000000000002"
 	source := &fakeSource{events: []Event{sampleEvent(), second}, markErr: errors.New("db write failed")}
 	producer := &fakeProducer{}
-	published, err := Drain(context.Background(), source, producer, 100)
+	published, err := Drain(context.Background(), source, producer, testSigner(t), 100)
 	if err == nil {
 		t.Fatal("mark failure swallowed")
 	}
@@ -180,16 +193,20 @@ func TestDrainPartialFailureReportsCount(t *testing.T) {
 }
 
 func TestDrainValidatesInputs(t *testing.T) {
-	if _, err := Drain(context.Background(), nil, &fakeProducer{}, 1); err == nil {
+	signer := testSigner(t)
+	if _, err := Drain(context.Background(), nil, &fakeProducer{}, signer, 1); err == nil {
 		t.Fatal("nil source accepted")
 	}
-	if _, err := Drain(context.Background(), &fakeSource{}, nil, 1); err == nil {
+	if _, err := Drain(context.Background(), &fakeSource{}, nil, signer, 1); err == nil {
 		t.Fatal("nil producer accepted")
 	}
-	if _, err := Drain(context.Background(), &fakeSource{}, &fakeProducer{}, 0); err == nil {
+	if _, err := Drain(context.Background(), &fakeSource{}, &fakeProducer{}, nil, 1); err == nil {
+		t.Fatal("nil signer accepted")
+	}
+	if _, err := Drain(context.Background(), &fakeSource{}, &fakeProducer{}, signer, 0); err == nil {
 		t.Fatal("zero batch accepted")
 	}
-	if _, err := Drain(context.Background(), &fakeSource{readErr: errors.New("db down")}, &fakeProducer{}, 1); err == nil {
+	if _, err := Drain(context.Background(), &fakeSource{readErr: errors.New("db down")}, &fakeProducer{}, signer, 1); err == nil {
 		t.Fatal("read error swallowed")
 	}
 }

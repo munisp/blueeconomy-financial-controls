@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
@@ -96,26 +97,51 @@ func (rail *DisbursementRail) Disburse(ctx context.Context, applicationID string
 	} else if !errors.Is(err, cvff.ErrNotFound) {
 		return fmt.Errorf("check existing disbursement legs: %w", err)
 	}
-	if application.Currency != "USD" {
-		return rail.failClosed(ctx, application, fmt.Errorf("application currency %s is not USD; the cost pair is USD-denominated", application.Currency))
-	}
 	disbursementDate := time.Date(rail.now().Year(), rail.now().Month(), rail.now().Day(), 0, 0, 0, 0, time.UTC)
 	rate, err := rail.rates.ConfirmedForDate(ctx, disbursementDate)
 	if err != nil {
 		return rail.failClosed(ctx, application, fmt.Errorf("capture CBN reference rate: %w", err))
 	}
-	equivalent, err := rate.ConvertUSDToNGN(application.Amount)
-	if err != nil {
-		return rail.failClosed(ctx, application, fmt.Errorf("fx-adjust USD cost: %w", err))
-	}
-	fee := equivalent * rail.config.FeeBasisPoints / 10_000
-	if fee == 0 {
-		return rail.failClosed(ctx, application, errors.New("custodial fee rounds to zero"))
+	// Both currencies are carried explicitly: the NGN custodial fee leg and
+	// the USD cost leg, with the CBN-rate conversion between them computed at
+	// disbursement time and persisted (rate ID, micro rate, effective date and
+	// timestamp) for audit. No silent defaults, no float math.
+	var fee, costUSDMinor, costNGNEquivalent uint64
+	switch application.Currency {
+	case "NGN":
+		// NGN-denominated intake (beneficiary portal): the fee is charged on
+		// the NGN principal and the USD cost leg is the principal converted at
+		// the captured CBN reference rate.
+		fee, err = custodialFee(application.Amount, rail.config.FeeBasisPoints)
+		if err != nil {
+			return rail.failClosed(ctx, application, fmt.Errorf("compute NGN custodial fee: %w", err))
+		}
+		costUSDMinor, err = rate.ConvertNGNToUSD(application.Amount)
+		if err != nil {
+			return rail.failClosed(ctx, application, fmt.Errorf("fx-convert NGN principal to USD cost: %w", err))
+		}
+		costNGNEquivalent = application.Amount
+	case "USD":
+		// USD-denominated applications (recovery and reconciliation tooling):
+		// the USD cost leg is the principal itself and the fee is charged on
+		// its NGN equivalent at the captured rate.
+		costNGNEquivalent, err = rate.ConvertUSDToNGN(application.Amount)
+		if err != nil {
+			return rail.failClosed(ctx, application, fmt.Errorf("fx-adjust USD cost: %w", err))
+		}
+		fee, err = custodialFee(costNGNEquivalent, rail.config.FeeBasisPoints)
+		if err != nil {
+			return rail.failClosed(ctx, application, fmt.Errorf("compute NGN custodial fee: %w", err))
+		}
+		costUSDMinor = application.Amount
+	default:
+		return rail.failClosed(ctx, application, fmt.Errorf("application currency %q is not an approved ledger currency (NGN, USD)", application.Currency))
 	}
 	legs, err := rail.pairs.CreateDisbursementPair(ledger.DisbursementPairInput{
 		ApplicationID:      applicationID,
 		FeeNGNMinor:        fee,
-		CostUSDMinor:       application.Amount,
+		CostUSDMinor:       costUSDMinor,
+		CostNGNEquivalent:  costNGNEquivalent,
 		Rate:               rate,
 		NGNDebitAccountID:  rail.config.NGNDebitAccountID,
 		NGNCreditAccountID: rail.config.NGNCreditAccountID,
@@ -133,6 +159,7 @@ func (rail *DisbursementRail) Disburse(ctx context.Context, applicationID string
 		ApplicationID:     legs.ApplicationID,
 		RateID:            legs.RateID,
 		NGNPerUSDMicro:    legs.NGNPerUSDMicro,
+		RateEffectiveDate: legs.RateEffectiveDate,
 		FeeTransferID:     legs.FeeTransferID.String(),
 		CostTransferID:    legs.CostTransferID.String(),
 		FeeNGNMinor:       legs.FeeNGNMinor,
@@ -142,6 +169,24 @@ func (rail *DisbursementRail) Disburse(ctx context.Context, applicationID string
 		return rail.failClosed(ctx, application, fmt.Errorf("record disbursement legs: %w", err))
 	}
 	return nil
+}
+
+// custodialFee computes base * basisPoints / 10_000 in integer math with an
+// explicit big.Int overflow guard on the multiply; a fee rounding to zero is
+// a hard error because a disbursement must never post an empty fee leg.
+func custodialFee(base uint64, basisPoints uint64) (uint64, error) {
+	if base == 0 {
+		return 0, errors.New("fee base must be non-zero")
+	}
+	product := new(big.Int).Mul(new(big.Int).SetUint64(base), new(big.Int).SetUint64(basisPoints))
+	quotient := product.Div(product, big.NewInt(10_000))
+	if !quotient.IsUint64() {
+		return 0, errors.New("custodial fee overflows ledger amount width")
+	}
+	if quotient.Sign() == 0 {
+		return 0, errors.New("custodial fee rounds to zero")
+	}
+	return quotient.Uint64(), nil
 }
 
 // failClosed moves the application to RECONCILIATION_REQUIRED and returns the

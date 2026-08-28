@@ -5,18 +5,22 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/fx"
 	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 // DisbursementPairInput describes the FX pass-through ledger entries for one
-// CVFF disbursement: an NGN custodial fee pair and a USD-denominated cost pair
-// valued with the dual-control-confirmed CBN reference rate.
+// CVFF disbursement: an NGN custodial fee pair and a USD-denominated cost
+// pair. CostNGNEquivalent is the NGN value of the USD cost leg at the
+// dual-control-confirmed CBN reference rate carried in Rate; the disbursement
+// rail computes it with fixed-point conversion and it is persisted for audit.
 type DisbursementPairInput struct {
 	ApplicationID      string
 	FeeNGNMinor        uint64
 	CostUSDMinor       uint64
+	CostNGNEquivalent  uint64
 	Rate               fx.Rate
 	NGNDebitAccountID  tigerbeetle.Uint128
 	NGNCreditAccountID tigerbeetle.Uint128
@@ -34,6 +38,7 @@ type DisbursementLegs struct {
 	ApplicationID     string
 	RateID            string
 	NGNPerUSDMicro    uint64
+	RateEffectiveDate time.Time
 	FeeTransferID     tigerbeetle.Uint128
 	CostTransferID    tigerbeetle.Uint128
 	FeeNGNMinor       uint64
@@ -42,8 +47,8 @@ type DisbursementLegs struct {
 }
 
 // BuildDisbursementPair constructs the two deterministic TigerBeetle transfers
-// without touching the cluster. It fails closed on invalid input or FX
-// overflow before any ledger write is attempted.
+// without touching the cluster. It fails closed on invalid input before any
+// ledger write is attempted.
 func BuildDisbursementPair(input DisbursementPairInput) ([]tigerbeetle.Transfer, DisbursementLegs, error) {
 	if input.ApplicationID == "" {
 		return nil, DisbursementLegs{}, errors.New("application ID is required")
@@ -51,12 +56,14 @@ func BuildDisbursementPair(input DisbursementPairInput) ([]tigerbeetle.Transfer,
 	if input.NGNLedger == 0 || input.USDLedger == 0 || input.FeeCode == 0 || input.CostCode == 0 {
 		return nil, DisbursementLegs{}, errors.New("disbursement ledgers and codes must be non-zero")
 	}
-	equivalent, err := input.Rate.ConvertUSDToNGN(input.CostUSDMinor)
-	if err != nil {
-		return nil, DisbursementLegs{}, fmt.Errorf("fx-adjust USD cost: %w", err)
+	if !input.Rate.Confirmed {
+		return nil, DisbursementLegs{}, errors.New("fx rate is not confirmed under dual control")
 	}
 	if input.FeeNGNMinor == 0 {
 		return nil, DisbursementLegs{}, errors.New("NGN custodial fee must be non-zero")
+	}
+	if input.CostNGNEquivalent == 0 {
+		return nil, DisbursementLegs{}, errors.New("NGN equivalent of the USD cost must be non-zero")
 	}
 	feeID := disbursementTransferID("cvff-fee-ngn", input.ApplicationID)
 	costID := disbursementTransferID("cvff-cost-usd", input.ApplicationID)
@@ -88,17 +95,21 @@ func BuildDisbursementPair(input DisbursementPairInput) ([]tigerbeetle.Transfer,
 		ApplicationID:     input.ApplicationID,
 		RateID:            input.Rate.RateID,
 		NGNPerUSDMicro:    input.Rate.NGNPerUSDMicro,
+		RateEffectiveDate: input.Rate.EffectiveDate,
 		FeeTransferID:     feeID,
 		CostTransferID:    costID,
 		FeeNGNMinor:       input.FeeNGNMinor,
 		CostUSDMinor:      input.CostUSDMinor,
-		CostNGNEquivalent: equivalent,
+		CostNGNEquivalent: input.CostNGNEquivalent,
 	}
 	return transfers, legs, nil
 }
 
 // CreateDisbursementPair posts both transfers. Deterministic transfer IDs make
-// retries idempotent at the TigerBeetle boundary.
+// retries idempotent at the TigerBeetle boundary: a TransferExists result for
+// a leg whose stored content matches the deterministic retry is idempotent
+// success (the transfer already committed), while a content mismatch is a
+// real conflict and fails closed.
 func (service *Service) CreateDisbursementPair(input DisbursementPairInput) (DisbursementLegs, error) {
 	transfers, legs, err := BuildDisbursementPair(input)
 	if err != nil {
@@ -112,7 +123,13 @@ func (service *Service) CreateDisbursementPair(input DisbursementPairInput) (Dis
 		return DisbursementLegs{}, fmt.Errorf("create TigerBeetle disbursement pair returned %d results, want %d", len(results), len(transfers))
 	}
 	for index, result := range results {
-		if result.Status != tigerbeetle.TransferCreated {
+		switch result.Status {
+		case tigerbeetle.TransferCreated:
+		case tigerbeetle.TransferExists:
+			if err := service.verifyExistingTransfer(transfers[index]); err != nil {
+				return DisbursementLegs{}, fmt.Errorf("disbursement transfer %d replay: %w", index, err)
+			}
+		default:
 			return DisbursementLegs{}, fmt.Errorf("create TigerBeetle disbursement transfer %d returned status %v", index, result.Status)
 		}
 	}

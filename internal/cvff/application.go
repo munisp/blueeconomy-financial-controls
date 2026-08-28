@@ -36,6 +36,10 @@ const (
 	RoleNIMASAApprover       Role = "NIMASA_APPROVER"
 	RoleReceivingBank        Role = "RECEIVING_BANK"
 	RoleBeneficiary          Role = "BENEFICIARY"
+	// RoleReconciliationOfficer is the only actor allowed to resolve the
+	// fail-closed RECONCILIATION_REQUIRED branch. It is deliberately outside
+	// the four-party chain: no chain principal may clear its own deadlock.
+	RoleReconciliationOfficer Role = "RECONCILIATION_OFFICER"
 )
 
 // Decision is the outcome a party records for its lifecycle part.
@@ -55,6 +59,21 @@ var (
 	ErrSequenceViolation     = errors.New("cvff decision is out of lifecycle sequence")
 	ErrTerminalState         = errors.New("cvff application is in a terminal state")
 	ErrRoleAssignmentInvalid = errors.New("cvff role assignments must cover each role exactly once")
+	ErrResolutionInvalid     = errors.New("unknown cvff reconciliation resolution")
+)
+
+// ReconciliationResolution is the operator decision that closes the
+// fail-closed RECONCILIATION_REQUIRED branch.
+type ReconciliationResolution string
+
+const (
+	// ResolutionResumeDisbursement returns the application to
+	// DISBURSEMENT_PENDING so the rail retries after the contradictory or
+	// missing evidence has been remediated (e.g. the CBN rate was posted).
+	ResolutionResumeDisbursement ReconciliationResolution = "RESUME_DISBURSEMENT"
+	// ResolutionReject closes the application as REJECTED when the
+	// reconciliation evidence shows the disbursement must never proceed.
+	ResolutionReject ReconciliationResolution = "REJECT"
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -138,6 +157,12 @@ func ValidateRoleAssignments(assignments map[Role]string) error {
 		seen[principal] = role
 	}
 	return nil
+}
+
+// RequiredRoleForState maps each decision state to the single role allowed
+// to decide it; ok is false for non-decision states.
+func RequiredRoleForState(state State) (Role, bool) {
+	return requiredRole(state)
 }
 
 // requiredRole maps each decision state to the single role allowed to decide it.
@@ -269,6 +294,25 @@ func RequireReconciliation(current Application) (Application, error) {
 		return Application{}, ErrTerminalState
 	}
 	current.State = StateReconciliationRequired
+	return current, nil
+}
+
+// ResolveReconciliation moves an application out of RECONCILIATION_REQUIRED:
+// RESUME_DISBURSEMENT returns it to DISBURSEMENT_PENDING for a remediated
+// retry, REJECT closes it as REJECTED. Any other state or resolution fails
+// closed; the branch is never silently abandoned and never auto-resolved.
+func ResolveReconciliation(current Application, resolution ReconciliationResolution) (Application, error) {
+	if current.State != StateReconciliationRequired {
+		return Application{}, ErrSequenceViolation
+	}
+	switch resolution {
+	case ResolutionResumeDisbursement:
+		current.State = StateDisbursementPending
+	case ResolutionReject:
+		current.State = StateRejected
+	default:
+		return Application{}, ErrResolutionInvalid
+	}
 	return current, nil
 }
 

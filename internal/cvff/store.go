@@ -193,6 +193,13 @@ func (store *Store) commitDecision(ctx context.Context, current, updated Applica
 // Transition applies a non-decision lifecycle move (begin underwriting, audit
 // close, reconciliation branch) guarded by the state machine and version check.
 func (store *Store) Transition(ctx context.Context, applicationID string, expectedVersion int64, move func(Application) (Application, error), eventType string) (Application, error) {
+	return store.transitionAs(ctx, applicationID, expectedVersion, move, eventType, workflowActorRole, workflowActorPrincipal)
+}
+
+// transitionAs is Transition with an explicit actor identity for the
+// transition log: the workflow service for rail moves, the deciding officer
+// for operator moves.
+func (store *Store) transitionAs(ctx context.Context, applicationID string, expectedVersion int64, move func(Application) (Application, error), eventType string, actorRole Role, actorPrincipal string) (Application, error) {
 	current, err := store.Get(ctx, applicationID)
 	if err != nil {
 		return Application{}, err
@@ -221,7 +228,7 @@ func (store *Store) Transition(ctx context.Context, applicationID string, expect
 	if err != nil {
 		return Application{}, fmt.Errorf("transition cvff application: %w", err)
 	}
-	if err := appendTransition(ctx, tx, retained.ApplicationID, current.State, retained.State, workflowActorRole, workflowActorPrincipal, eventType, updatedAt); err != nil {
+	if err := appendTransition(ctx, tx, retained.ApplicationID, current.State, retained.State, actorRole, actorPrincipal, eventType, updatedAt); err != nil {
 		return Application{}, err
 	}
 	if err := appendEvent(ctx, tx, retained.ApplicationID, eventType, retained, updatedAt); err != nil {
@@ -231,6 +238,130 @@ func (store *Store) Transition(ctx context.Context, applicationID string, expect
 		return Application{}, fmt.Errorf("commit transition: %w", err)
 	}
 	return retained, nil
+}
+
+// officerActorRole attributes role-assignment writes to the assigning officer.
+const officerActorRole Role = "CVFF_OFFICER"
+
+// AssignRoles binds the four-party chain principals to one existing
+// application. It is the production writer behind cvff_role_assignments for
+// beneficiary-intake applications (which are recorded before the parties are
+// designated). Replay is idempotent: re-assigning the identical binding is
+// success; a divergent binding is a hard conflict because role holders are
+// disbursement-authority evidence and are never silently replaced. The
+// assigning officer must not be one of the parties (separation of duties).
+func (store *Store) AssignRoles(ctx context.Context, applicationID string, officerPrincipal string, assignments map[Role]string) (map[Role]string, error) {
+	if err := ValidateIdentifier("application_id", applicationID); err != nil {
+		return nil, err
+	}
+	if err := ValidateIdentifier("principal_id", officerPrincipal); err != nil {
+		return nil, err
+	}
+	if err := ValidateRoleAssignments(assignments); err != nil {
+		return nil, err
+	}
+	for role, principal := range assignments {
+		if principal == officerPrincipal {
+			return nil, fmt.Errorf("%w: assigning officer holds %s", ErrRoleSeparation, role)
+		}
+	}
+	current, err := store.Get(ctx, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	if current.State.Terminal() {
+		return nil, ErrTerminalState
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin role assignment: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT role, principal_id FROM cvff_role_assignments WHERE application_id = $1 FOR UPDATE`, applicationID)
+	if err != nil {
+		return nil, fmt.Errorf("lock cvff role assignments: %w", err)
+	}
+	existing := make(map[Role]string)
+	for rows.Next() {
+		var role Role
+		var principal string
+		if err := rows.Scan(&role, &principal); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan cvff role assignment: %w", err)
+		}
+		existing[role] = principal
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate cvff role assignments: %w", err)
+	}
+	if len(existing) > 0 {
+		if roleAssignmentsEqual(existing, assignments) {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit role assignment replay: %w", err)
+			}
+			return existing, nil
+		}
+		return nil, fmt.Errorf("%w: application already has divergent role assignments", ErrConflict)
+	}
+	createdAt := time.Now().UTC()
+	for _, role := range []Role{RoleUnderwriterPrimary, RoleUnderwriterSecondary, RoleUnderwriterTertiary, RoleNIMASAApprover, RoleReceivingBank, RoleBeneficiary} {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO cvff_role_assignments (application_id, role, principal_id, created_at) VALUES ($1,$2,$3,$4)`,
+			applicationID, role, assignments[role], createdAt); err != nil {
+			return nil, fmt.Errorf("assign cvff role %s: %w", role, err)
+		}
+	}
+	if err := appendTransition(ctx, tx, applicationID, current.State, current.State, officerActorRole, officerPrincipal, "cvff.roles_assigned", createdAt); err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"application_id": applicationID, "officer": officerPrincipal, "assignments": assignments}
+	if err := appendEvent(ctx, tx, applicationID, "cvff.roles_assigned", payload, createdAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit role assignment: %w", err)
+	}
+	retained := make(map[Role]string, len(assignments))
+	for role, principal := range assignments {
+		retained[role] = principal
+	}
+	return retained, nil
+}
+
+func roleAssignmentsEqual(left, right map[Role]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for role, principal := range left {
+		if held, ok := right[role]; !ok || held != principal {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveReconciliation applies a reconciliation officer's resolution to the
+// fail-closed RECONCILIATION_REQUIRED branch, recording the transition under
+// the officer's identity and the outbox event in one transaction. The officer
+// must not be one of the application's chain principals: no party may clear a
+// deadlock it helped create.
+func (store *Store) ResolveReconciliation(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution ReconciliationResolution) (Application, error) {
+	if err := ValidateIdentifier("principal_id", officerPrincipal); err != nil {
+		return Application{}, err
+	}
+	assignments, err := store.RoleAssignments(ctx, applicationID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return Application{}, err
+	}
+	for role, principal := range assignments {
+		if principal == officerPrincipal {
+			return Application{}, fmt.Errorf("%w: reconciliation officer holds %s on this application", ErrRoleSeparation, role)
+		}
+	}
+	return store.transitionAs(ctx, applicationID, expectedVersion, func(current Application) (Application, error) {
+		return ResolveReconciliation(current, resolution)
+	}, "cvff.reconciliation_resolved", RoleReconciliationOfficer, officerPrincipal)
 }
 
 // RecordEscalation appends an SLA-expiry audit event without advancing state.

@@ -22,7 +22,7 @@ func newReportHandler(t *testing.T, store *fakeStore, principal Principal, authE
 	t.Helper()
 	handler, err := NewHandler(store,
 		stubAuthenticator{principal: principal, err: authErr},
-		&fakeBlobs{puts: map[string][]byte{}}, fakeScanner{}, testLimits(), &fakeStarter{})
+		&fakeBlobs{puts: map[string][]byte{}}, fakeScanner{}, testLimits(), &fakeStarter{}, &fakeSignaler{}, testPolicyEnforcer(t))
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}

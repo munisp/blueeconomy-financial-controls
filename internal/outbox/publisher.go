@@ -24,14 +24,19 @@ type EventSource interface {
 
 // Drain publishes up to batchSize unpublished events at-least-once: an event
 // is marked published only after the producer accepts it, and the idempotent
-// key makes replays safe. Any failure aborts the batch (fail-closed) and
-// returns the count already published.
-func Drain(ctx context.Context, source EventSource, producer Producer, batchSize int) (int, error) {
+// key makes replays safe. Every envelope is signed by the service key before
+// publication; an absent signer is a hard error, never an unsigned envelope.
+// Any failure aborts the batch (fail-closed) and returns the count already
+// published.
+func Drain(ctx context.Context, source EventSource, producer Producer, signer *EnvelopeSigner, batchSize int) (int, error) {
 	if source == nil {
 		return 0, errors.New("outbox event source is required")
 	}
 	if producer == nil {
 		return 0, errors.New("Kafka producer is required")
+	}
+	if signer == nil {
+		return 0, errors.New("envelope signer is required; unsigned envelopes are never published")
 	}
 	if batchSize <= 0 {
 		return 0, errors.New("batch size must be positive")
@@ -45,6 +50,10 @@ func Drain(ctx context.Context, source EventSource, producer Producer, batchSize
 		envelope, err := BuildEnvelope(event)
 		if err != nil {
 			return published, fmt.Errorf("build envelope for %s: %w", event.EventID, err)
+		}
+		envelope, err = signer.SignEnvelope(envelope)
+		if err != nil {
+			return published, fmt.Errorf("sign envelope for %s: %w", event.EventID, err)
 		}
 		value, err := json.Marshal(envelope)
 		if err != nil {

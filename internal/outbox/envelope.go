@@ -1,10 +1,10 @@
 // Package outbox drains the transactional outboxes to Kafka with the
 // platform FHIR-aligned envelope, at-least-once delivery and idempotent keys.
+// Every envelope carries an Ed25519 JWS provenance signature over the
+// RFC 8785 canonical envelope; envelopes are never published unsigned.
 package outbox
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,6 +76,8 @@ var envelopeEventTypes = map[string]string{
 	"cvff.disbursed":                 "cvff.disbursement.v1",
 	"cvff.audited":                   "cvff.disbursement.v1",
 	"cvff.reconciliation_required":   "cvff.disbursement.v1",
+	"cvff.roles_assigned":            "cvff.disbursement.v1",
+	"cvff.reconciliation_resolved":   "cvff.disbursement.v1",
 }
 
 // BuildEnvelope maps one outbox event to the platform envelope. It fails
@@ -97,7 +99,8 @@ func BuildEnvelope(event Event) (Envelope, error) {
 	}
 	resource["internalEventType"] = event.EventType
 	resource["subjectId"] = event.SubjectID
-	digest := sha256.Sum256(event.Payload)
+	// The provenance signature is deliberately empty here: SignEnvelope fills
+	// it with the Ed25519 JWS over the canonical envelope before publication.
 	return Envelope{
 		EnvelopeVersion: EnvelopeVersion,
 		EventID:         event.EventID,
@@ -113,7 +116,6 @@ func BuildEnvelope(event Event) (Envelope, error) {
 		Provenance: Provenance{
 			PrincipalID:      stringField(resource, "maker", "principal_id", "PrincipalID"),
 			PrincipalRole:    stringField(resource, "role", "state", "State"),
-			Signature:        hex.EncodeToString(digest[:]),
 			LedgerCommitHash: stringField(resource, "intent_id", "application_id", "fee_transfer_id"),
 		},
 		Classification: ClassificationFIDUCIARY,

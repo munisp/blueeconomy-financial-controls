@@ -11,11 +11,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
+	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
+	"github.com/munisp/blueeconomy-financial-controls/internal/workflow"
 )
 
 const (
@@ -36,6 +39,113 @@ type fakeStore struct {
 	reportErr    error
 	reportFrom   time.Time
 	reportTo     time.Time
+	assignments  map[string]map[cvff.Role]string
+	getErr       error
+	assignErr    error
+	resolveErr   error
+}
+
+func (store *fakeStore) Get(_ context.Context, applicationID string) (cvff.Application, error) {
+	if store.getErr != nil {
+		return cvff.Application{}, store.getErr
+	}
+	for _, application := range store.applications {
+		if application.ApplicationID == applicationID {
+			return application.Application, nil
+		}
+	}
+	return cvff.Application{}, cvff.ErrNotFound
+}
+
+func (store *fakeStore) RoleAssignments(_ context.Context, applicationID string) (map[cvff.Role]string, error) {
+	if assignments, ok := store.assignments[applicationID]; ok {
+		return assignments, nil
+	}
+	return nil, cvff.ErrNotFound
+}
+
+func (store *fakeStore) AssignRoles(_ context.Context, applicationID string, _ string, assignments map[cvff.Role]string) (map[cvff.Role]string, error) {
+	if store.assignErr != nil {
+		return nil, store.assignErr
+	}
+	if _, err := store.Get(context.Background(), applicationID); err != nil {
+		return nil, err
+	}
+	if store.assignments == nil {
+		store.assignments = map[string]map[cvff.Role]string{}
+	}
+	if existing, ok := store.assignments[applicationID]; ok {
+		for role, party := range assignments {
+			if existing[role] != party {
+				return nil, cvff.ErrConflict
+			}
+		}
+		return existing, nil
+	}
+	retained := map[cvff.Role]string{}
+	for role, party := range assignments {
+		retained[role] = party
+	}
+	store.assignments[applicationID] = retained
+	return retained, nil
+}
+
+func (store *fakeStore) ResolveReconciliation(_ context.Context, applicationID string, _ int64, _ string, resolution cvff.ReconciliationResolution) (cvff.Application, error) {
+	if store.resolveErr != nil {
+		return cvff.Application{}, store.resolveErr
+	}
+	for index, application := range store.applications {
+		if application.ApplicationID != applicationID {
+			continue
+		}
+		updated, err := cvff.ResolveReconciliation(application.Application, resolution)
+		if err != nil {
+			return cvff.Application{}, err
+		}
+		store.applications[index].Application = updated
+		return updated, nil
+	}
+	return cvff.Application{}, cvff.ErrNotFound
+}
+
+type fakeSignaler struct {
+	decisions   []recordedSignal
+	resolutions []workflow.ResolutionSignal
+	err         error
+	resolveErr  error
+}
+
+type recordedSignal struct {
+	applicationID string
+	signalName    string
+	signal        workflow.DecisionSignal
+}
+
+func (signaler *fakeSignaler) SignalDecision(_ context.Context, applicationID, signalName string, signal workflow.DecisionSignal) error {
+	if signaler.err != nil {
+		return signaler.err
+	}
+	signaler.decisions = append(signaler.decisions, recordedSignal{applicationID: applicationID, signalName: signalName, signal: signal})
+	return nil
+}
+
+func (signaler *fakeSignaler) SignalResolution(_ context.Context, applicationID string, signal workflow.ResolutionSignal) error {
+	if signaler.resolveErr != nil {
+		return signaler.resolveErr
+	}
+	signaler.resolutions = append(signaler.resolutions, signal)
+	return nil
+}
+
+// testPolicyEnforcer compiles the shipped policy pack so handler tests run
+// the production allow/deny rules.
+func testPolicyEnforcer(t *testing.T) *pbac.Enforcer {
+	t.Helper()
+	enforcer, err := pbac.LoadEnforcer(filepath.Join("..", "..", "policies"))
+	if err != nil {
+		t.Fatalf("load policy pack: %v", err)
+	}
+	return enforcer
 }
 
 func (store *fakeStore) DualLedgerReport(_ context.Context, from, to time.Time) ([]cvff.DualLedgerReport, error) {
@@ -146,6 +256,15 @@ func (store *fakeStore) CreateDocument(_ context.Context, document cvff.Document
 	return document, nil
 }
 
+// setState moves one seeded application for pipeline tests.
+func (store *fakeStore) setState(applicationID string, state cvff.State) {
+	for index, application := range store.applications {
+		if application.ApplicationID == applicationID {
+			store.applications[index].Application.State = state
+		}
+	}
+}
+
 func (store *fakeStore) ListDocuments(_ context.Context, applicationID string) ([]cvff.Document, error) {
 	result := make([]cvff.Document, 0)
 	for _, document := range store.documents {
@@ -196,7 +315,7 @@ func newTestHandlerWithStarter(t *testing.T, store *fakeStore, blobs *fakeBlobs,
 	t.Helper()
 	handler, err := NewHandler(store,
 		stubAuthenticator{principal: Principal{Subject: testSubject, Roles: []string{BeneficiaryRole}}},
-		blobs, scanner, testLimits(), starter)
+		blobs, scanner, testLimits(), starter, &fakeSignaler{}, testPolicyEnforcer(t))
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -234,23 +353,31 @@ func TestNewHandlerFailClosed(t *testing.T) {
 	store := &fakeStore{}
 	blobs := &fakeBlobs{puts: map[string][]byte{}}
 	auth := stubAuthenticator{principal: Principal{Subject: testSubject}}
-	if _, err := NewHandler(nil, auth, blobs, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
+	signaler := &fakeSignaler{}
+	policy := testPolicyEnforcer(t)
+	if _, err := NewHandler(nil, auth, blobs, fakeScanner{}, testLimits(), &fakeStarter{}, signaler, policy); err == nil {
 		t.Fatal("nil store accepted")
 	}
-	if _, err := NewHandler(store, nil, blobs, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
+	if _, err := NewHandler(store, nil, blobs, fakeScanner{}, testLimits(), &fakeStarter{}, signaler, policy); err == nil {
 		t.Fatal("nil authenticator accepted")
 	}
-	if _, err := NewHandler(store, auth, nil, fakeScanner{}, testLimits(), &fakeStarter{}); err == nil {
+	if _, err := NewHandler(store, auth, nil, fakeScanner{}, testLimits(), &fakeStarter{}, signaler, policy); err == nil {
 		t.Fatal("nil blob store accepted")
 	}
-	if _, err := NewHandler(store, auth, blobs, nil, testLimits(), &fakeStarter{}); err == nil {
+	if _, err := NewHandler(store, auth, blobs, nil, testLimits(), &fakeStarter{}, signaler, policy); err == nil {
 		t.Fatal("nil scanner accepted")
 	}
-	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, Limits{}, &fakeStarter{}); err == nil {
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, Limits{}, &fakeStarter{}, signaler, policy); err == nil {
 		t.Fatal("empty limits accepted")
 	}
-	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, testLimits(), nil); err == nil {
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, testLimits(), nil, signaler, policy); err == nil {
 		t.Fatal("nil workflow starter accepted")
+	}
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, testLimits(), &fakeStarter{}, nil, policy); err == nil {
+		t.Fatal("nil workflow signaler accepted")
+	}
+	if _, err := NewHandler(store, auth, blobs, fakeScanner{}, testLimits(), &fakeStarter{}, signaler, nil); err == nil {
+		t.Fatal("nil policy enforcer accepted")
 	}
 }
 

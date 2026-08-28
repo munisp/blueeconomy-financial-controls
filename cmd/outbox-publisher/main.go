@@ -54,11 +54,15 @@ func run() error {
 		return err
 	}
 	defer producer.Close()
+	signer, err := outbox.NewEnvelopeSignerFromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("envelope signing: %w", err)
+	}
 	source := outbox.NewPostgresSource(pool)
 
-	log.Printf("outbox-publisher: draining to topic %s every %s (batch %d)", topic, interval, batch)
+	log.Printf("outbox-publisher: draining to topic %s every %s (batch %d, signing kid %s)", topic, interval, batch, signer.KeyID())
 	for {
-		published, err := outbox.Drain(ctx, source, producer, batch)
+		published, err := outbox.Drain(ctx, source, producer, signer, batch)
 		if err != nil {
 			return fmt.Errorf("drain outbox: %w (published %d before failure)", err, published)
 		}

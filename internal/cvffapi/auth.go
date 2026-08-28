@@ -25,6 +25,15 @@ const BeneficiaryRole = "beneficiary"
 // provision this realm role and bind it only to auditor identities.
 const AuditorRole = "auditor"
 
+// OfficerRole is the approved realm role a caller must hold to bind the
+// four-party roles on an application. GitOps binds it to CVFF operations
+// officers only; the PBAC policy additionally forbids self-dealing.
+const OfficerRole = "cvff-officer"
+
+// ReconciliationOfficerRole is the approved realm role a caller must hold to
+// resolve the fail-closed RECONCILIATION_REQUIRED branch.
+const ReconciliationOfficerRole = "reconciliation-officer"
+
 var (
 	// ErrUnauthenticated marks a missing, malformed or unverifiable bearer
 	// token. It maps to HTTP 401.
@@ -39,6 +48,11 @@ var (
 type Principal struct {
 	Subject string
 	Roles   []string
+	// Clearance is the token's explicit data-classification clearance claim;
+	// empty means the PBAC policy derives clearance from roles only.
+	Clearance string
+	// TenantID binds the principal to a tenant; empty is the default tenant.
+	TenantID string
 }
 
 // Authenticator verifies the Authorization header of one request.
@@ -71,6 +85,8 @@ func (config KeycloakConfig) validate() error {
 type keycloakClaims struct {
 	jwt.RegisteredClaims
 	AuthorizedParty string `json:"azp"`
+	Clearance       string `json:"clearance"`
+	TenantID        string `json:"tenant_id"`
 	RealmAccess     struct {
 		Roles []string `json:"roles"`
 	} `json:"realm_access"`
@@ -251,7 +267,12 @@ func (authenticator *KeycloakAuthenticator) Authenticate(ctx context.Context, au
 	if !audienceOK {
 		return Principal{}, fmt.Errorf("%w: token is not issued for this API audience", ErrUnauthenticated)
 	}
-	return Principal{Subject: claims.Subject, Roles: append([]string(nil), claims.RealmAccess.Roles...)}, nil
+	return Principal{
+		Subject:   claims.Subject,
+		Roles:     append([]string(nil), claims.RealmAccess.Roles...),
+		Clearance: strings.TrimSpace(claims.Clearance),
+		TenantID:  strings.TrimSpace(claims.TenantID),
+	}, nil
 }
 
 func (principal Principal) hasRole(role string) bool {
@@ -272,6 +293,22 @@ type principalContextKey struct{}
 // without the beneficiary role.
 func RequireAuth(authenticator Authenticator, next http.Handler) http.Handler {
 	return RequireRole(authenticator, BeneficiaryRole, next)
+}
+
+// RequireAuthenticated wraps one handler with bearer verification only; the
+// caller's authority for the specific route is delegated to the PBAC policy
+// layer and the per-application role bindings. Used by the four-party
+// decision route whose callers hold different realm roles.
+func RequireAuthenticated(authenticator Authenticator, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		principal, err := authenticator.Authenticate(request.Context(), request.Header.Get("Authorization"))
+		if err != nil {
+			writeProblem(writer, http.StatusUnauthorized, "A valid bearer token is required.", nil)
+			return
+		}
+		ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
+		next.ServeHTTP(writer, request.WithContext(ctx))
+	})
 }
 
 // RequireRole wraps one handler with bearer verification and enforces one

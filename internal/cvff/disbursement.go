@@ -10,10 +10,14 @@ import (
 )
 
 // DisbursementLegs is the persisted dual-ledger evidence for one disbursement.
+// The CBN-rate conversion applied at disbursement time is recorded with the
+// rate (ID, micro value, effective date) and the recording timestamp, so the
+// exact NGN↔USD basis of both legs is auditable.
 type DisbursementLegs struct {
 	ApplicationID     string    `json:"application_id"`
 	RateID            string    `json:"rate_id"`
 	NGNPerUSDMicro    uint64    `json:"ngn_per_usd_micro"`
+	RateEffectiveDate time.Time `json:"rate_effective_date"`
 	FeeTransferID     string    `json:"fee_transfer_id"`
 	CostTransferID    string    `json:"cost_transfer_id"`
 	FeeNGNMinor       uint64    `json:"fee_ngn_minor"`
@@ -31,6 +35,11 @@ func (store *Store) RecordDisbursementLegs(ctx context.Context, legs Disbursemen
 	if legs.NGNPerUSDMicro == 0 || legs.FeeNGNMinor == 0 || legs.CostUSDMinor == 0 || legs.CostNGNEquivalent == 0 {
 		return errors.New("disbursement legs amounts must be non-zero")
 	}
+	if legs.RateEffectiveDate.IsZero() || legs.RateEffectiveDate.Location() != time.UTC ||
+		legs.RateEffectiveDate.Hour() != 0 || legs.RateEffectiveDate.Minute() != 0 ||
+		legs.RateEffectiveDate.Second() != 0 || legs.RateEffectiveDate.Nanosecond() != 0 {
+		return errors.New("disbursement legs rate effective date must be a UTC calendar date")
+	}
 	tx, err := store.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin disbursement legs: %w", err)
@@ -39,11 +48,11 @@ func (store *Store) RecordDisbursementLegs(ctx context.Context, legs Disbursemen
 	createdAt := time.Now().UTC()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO cvff_disbursement_legs (
-			application_id, rate_id, ngn_per_usd_micro, fee_transfer_id, cost_transfer_id,
+			application_id, rate_id, ngn_per_usd_micro, rate_effective_date, fee_transfer_id, cost_transfer_id,
 			fee_ngn_minor, cost_usd_minor, cost_ngn_equivalent, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		ON CONFLICT (application_id) DO NOTHING`,
-		legs.ApplicationID, legs.RateID, legs.NGNPerUSDMicro, legs.FeeTransferID, legs.CostTransferID,
+		legs.ApplicationID, legs.RateID, legs.NGNPerUSDMicro, legs.RateEffectiveDate, legs.FeeTransferID, legs.CostTransferID,
 		legs.FeeNGNMinor, legs.CostUSDMinor, legs.CostNGNEquivalent, createdAt); err != nil {
 		return fmt.Errorf("insert disbursement legs: %w", err)
 	}
@@ -65,6 +74,7 @@ type DualLedgerReport struct {
 	CostUSDMinor      uint64    `json:"cost_usd_minor"`
 	CostNGNEquivalent uint64    `json:"cost_ngn_equivalent"`
 	NGNPerUSDMicro    uint64    `json:"ngn_per_usd_micro"`
+	RateEffectiveDate time.Time `json:"rate_effective_date"`
 	FeeTransferID     string    `json:"fee_transfer_id"`
 	CostTransferID    string    `json:"cost_transfer_id"`
 	DisbursedAt       time.Time `json:"disbursed_at"`
@@ -80,7 +90,7 @@ func (store *Store) DualLedgerReport(ctx context.Context, from, to time.Time) ([
 	}
 	rows, err := store.pool.Query(ctx, `
 		SELECT a.application_id, a.beneficiary_id, a.state,
-			l.fee_ngn_minor, l.cost_usd_minor, l.cost_ngn_equivalent, l.ngn_per_usd_micro,
+			l.fee_ngn_minor, l.cost_usd_minor, l.cost_ngn_equivalent, l.ngn_per_usd_micro, l.rate_effective_date,
 			l.fee_transfer_id, l.cost_transfer_id, l.created_at
 		FROM cvff_disbursement_legs l
 		JOIN cvff_applications a ON a.application_id = l.application_id
@@ -94,7 +104,7 @@ func (store *Store) DualLedgerReport(ctx context.Context, from, to time.Time) ([
 	for rows.Next() {
 		var row DualLedgerReport
 		if err := rows.Scan(&row.ApplicationID, &row.BeneficiaryID, &row.State,
-			&row.FeeNGNMinor, &row.CostUSDMinor, &row.CostNGNEquivalent, &row.NGNPerUSDMicro,
+			&row.FeeNGNMinor, &row.CostUSDMinor, &row.CostNGNEquivalent, &row.NGNPerUSDMicro, &row.RateEffectiveDate,
 			&row.FeeTransferID, &row.CostTransferID, &row.DisbursedAt); err != nil {
 			return nil, fmt.Errorf("scan dual-ledger report row: %w", err)
 		}
@@ -110,10 +120,10 @@ func (store *Store) DualLedgerReport(ctx context.Context, from, to time.Time) ([
 func (store *Store) DisbursementLegs(ctx context.Context, applicationID string) (DisbursementLegs, error) {
 	var legs DisbursementLegs
 	err := store.pool.QueryRow(ctx, `
-		SELECT application_id, rate_id, ngn_per_usd_micro, fee_transfer_id, cost_transfer_id,
+		SELECT application_id, rate_id, ngn_per_usd_micro, rate_effective_date, fee_transfer_id, cost_transfer_id,
 			fee_ngn_minor, cost_usd_minor, cost_ngn_equivalent, created_at
 		FROM cvff_disbursement_legs WHERE application_id = $1`, applicationID).
-		Scan(&legs.ApplicationID, &legs.RateID, &legs.NGNPerUSDMicro, &legs.FeeTransferID, &legs.CostTransferID,
+		Scan(&legs.ApplicationID, &legs.RateID, &legs.NGNPerUSDMicro, &legs.RateEffectiveDate, &legs.FeeTransferID, &legs.CostTransferID,
 			&legs.FeeNGNMinor, &legs.CostUSDMinor, &legs.CostNGNEquivalent, &legs.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DisbursementLegs{}, ErrNotFound

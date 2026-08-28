@@ -77,10 +77,44 @@ func (store *stubStore) RecordEscalation(_ context.Context, applicationID string
 	return nil
 }
 
-type stubDisburser struct{ calls int }
+func (store *stubStore) ResolveReconciliation(_ context.Context, applicationID string, _ int64, _ string, resolution cvff.ReconciliationResolution) (cvff.Application, error) {
+	if applicationID != store.application.ApplicationID {
+		return cvff.Application{}, cvff.ErrNotFound
+	}
+	updated, err := cvff.ResolveReconciliation(store.application, resolution)
+	if err != nil {
+		return cvff.Application{}, err
+	}
+	store.application = updated
+	store.application.Version++
+	return store.application, nil
+}
 
-func (disburser *stubDisburser) Disburse(context.Context, string) error {
+type stubDisburser struct {
+	calls      int
+	failures   int
+	failureErr error
+	store      *stubStore
+}
+
+// Disburse mirrors the production rail contract: a failure first moves the
+// application into the fail-closed RECONCILIATION_REQUIRED branch, then
+// returns the error.
+func (disburser *stubDisburser) Disburse(_ context.Context, applicationID string) error {
 	disburser.calls++
+	if disburser.failures > 0 {
+		disburser.failures--
+		if disburser.store != nil && disburser.store.application.ApplicationID == applicationID {
+			if updated, err := cvff.RequireReconciliation(disburser.store.application); err == nil {
+				disburser.store.application = updated
+				disburser.store.application.Version++
+			}
+		}
+		if disburser.failureErr != nil {
+			return disburser.failureErr
+		}
+		return errors.New("tigerbeetle cluster unreachable")
+	}
 	return nil
 }
 
@@ -91,13 +125,14 @@ func newTestEnvironment(t *testing.T) (*testsuite.TestWorkflowEnvironment, *stub
 	// Friday: business-day SLA deadlines cross the weekend deterministically.
 	env.SetStartTime(time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC))
 	store := newStubStore()
-	disburser := &stubDisburser{}
+	disburser := &stubDisburser{store: store}
 	activities, err := NewActivities(store, disburser)
 	require.NoError(t, err)
 	env.RegisterActivityWithOptions(activities.BeginUnderwriting, activity.RegisterOptions{Name: ActivityBeginUnderwriting})
 	env.RegisterActivityWithOptions(activities.RecordDecision, activity.RegisterOptions{Name: ActivityRecordDecision})
 	env.RegisterActivityWithOptions(activities.RecordEscalation, activity.RegisterOptions{Name: ActivityRecordEscalation})
 	env.RegisterActivityWithOptions(activities.Disburse, activity.RegisterOptions{Name: ActivityDisburse})
+	env.RegisterActivityWithOptions(activities.ResolveReconciliation, activity.RegisterOptions{Name: ActivityResolveReconciliation})
 	env.RegisterActivityWithOptions(activities.CommitAudit, activity.RegisterOptions{Name: ActivityCommitAudit})
 	definition, err := NewCVFFWorkflow(activities)
 	require.NoError(t, err)
@@ -195,6 +230,44 @@ func TestWorkflowSLAExpiryEscalatesAndContinues(t *testing.T) {
 	require.Equal(t, 1, result.Escalations)
 	require.Equal(t, []cvff.UnderwritingTier{cvff.TierPrimary}, store.escalations)
 	require.Equal(t, 1, disburser.calls)
+}
+
+// TestWorkflowDisbursementFailureParksAndResumes: a disbursement failure
+// parks the workflow in RECONCILIATION_REQUIRED; the reconciliation officer's
+// RESUME signal retries disbursement through the same deterministic workflow
+// and the chain completes. A REJECT signal would close it as REJECTED.
+func TestWorkflowDisbursementFailureParksAndResumes(t *testing.T) {
+	env, store, disburser, definition := newTestEnvironment(t)
+	disburser.failures = 1
+	signalAllParties(env, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalReconciliationResolution, ResolutionSignal{PrincipalID: "kc-recon-officer", Resolution: cvff.ResolutionResumeDisbursement})
+	}, 12*time.Minute)
+	env.ExecuteWorkflow(definition.CVFFDisbursementWorkflow, DisbursementInput{ApplicationID: "cvff-001"})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	var result DisbursementResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, cvff.StateAudited, result.State)
+	require.Equal(t, 2, disburser.calls, "disbursement retried after resume")
+	require.Equal(t, cvff.StateAudited, store.application.State)
+}
+
+func TestWorkflowReconciliationRejectClosesChain(t *testing.T) {
+	env, store, disburser, definition := newTestEnvironment(t)
+	disburser.failures = 1
+	signalAllParties(env, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalReconciliationResolution, ResolutionSignal{PrincipalID: "kc-recon-officer", Resolution: cvff.ResolutionReject})
+	}, 12*time.Minute)
+	env.ExecuteWorkflow(definition.CVFFDisbursementWorkflow, DisbursementInput{ApplicationID: "cvff-001"})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	var result DisbursementResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, cvff.StateRejected, result.State)
+	require.Equal(t, 1, disburser.calls, "rejected reconciliation never retries disbursement")
+	require.Equal(t, cvff.StateRejected, store.application.State)
 }
 
 func TestNewActivitiesFailsClosed(t *testing.T) {

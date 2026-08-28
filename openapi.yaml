@@ -103,6 +103,51 @@ paths:
         '413': {description: File exceeds the approved size limit.}
         '422': {description: Unapproved document type, content type, empty file or infected content.}
         '503': {description: Malware scanner unavailable; upload refused (fail closed).}
+  /v1/cvff/applications/{application_id}/decisions:
+    post:
+      operationId: recordCvffPartyDecision
+      description: Delivers one four-party decision to the application's deterministic disbursement workflow (workflow ID cvff-disbursement-<application_id>; signal-with-start when no execution is running). The caller must be the principal durably bound to the role the current state awaits; the workflow activity re-enforces the binding against the database. Accepted means the signal was durably delivered, not that the state changed.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffDecision'}}}}
+      responses:
+        '202': {description: Decision delivered to the disbursement workflow.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Policy denial, or the identity is not the assigned party for the current state.}
+        '404': {description: Application not found.}
+        '409': {description: Application is not awaiting a party decision, or roles are not assigned yet.}
+        '422': {description: Decision must be APPROVE or REJECT.}
+        '503': {description: Workflow unreachable; retry the same request.}
+  /v1/cvff/admin/applications/{application_id}/roles:
+    put:
+      operationId: assignCvffPartyRoles
+      description: Binds the six four-party roles on one existing application. Requires the cvff-officer realm role; the policy pack enforces segregation of duties (six distinct parties, officer never a party). The write is idempotent (identical replay succeeds, divergent replay conflicts) and the disbursement workflow is (re-)started on the deterministic workflow ID.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffRoleAssignmentRequest'}}}}
+      responses:
+        '200': {description: Roles assigned (or idempotent replay).}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the cvff-officer realm role, or policy denial (SoD violation).}
+        '404': {description: Application not found.}
+        '409': {description: Divergent assignments already recorded, or application closed.}
+        '422': {description: Incomplete or SoD-violating assignments.}
+        '503': {description: Roles recorded but the workflow could not be started; retry the same request.}
+  /v1/cvff/admin/applications/{application_id}/reconciliation:
+    post:
+      operationId: resolveCvffReconciliation
+      description: Resolves an application parked in RECONCILIATION_REQUIRED. Requires the reconciliation-officer realm role; the officer may not be a chain party on the application. RESUME_DISBURSEMENT returns the application to DISBURSEMENT_PENDING (the parked workflow retries disbursement); REJECT closes it as REJECTED. The state transition is applied by the workflow's resolution activity under the officer's recorded identity.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffReconciliationResolution'}}}}
+      responses:
+        '202': {description: Resolution delivered to the parked workflow.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the reconciliation-officer realm role, or policy denial.}
+        '404': {description: Application not found.}
+        '409': {description: Application is not awaiting reconciliation resolution.}
+        '422': {description: Resolution must be RESUME_DISBURSEMENT or REJECT.}
+        '503': {description: Workflow not parked or unreachable.}
   /v1/cvff/reports/dual-ledger:
     get:
       operationId: getCvffDualLedgerReport
@@ -206,6 +251,31 @@ components:
     CvffState:
       type: string
       enum: [SUBMITTED, UNDERWRITING_PRIMARY, UNDERWRITING_SECONDARY, UNDERWRITING_TERTIARY, NIMASA_APPROVAL, BANK_CONFIRMATION, DISBURSEMENT_PENDING, DISBURSED, AUDITED, REJECTED, RECONCILIATION_REQUIRED]
+    CvffDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: {type: string, enum: [APPROVE, REJECT]}
+    CvffRoleAssignmentRequest:
+      type: object
+      required: [assignments]
+      properties:
+        assignments:
+          type: object
+          required: [UNDERWRITER_PRIMARY, UNDERWRITER_SECONDARY, UNDERWRITER_TERTIARY, NIMASA_APPROVER, RECEIVING_BANK, BENEFICIARY]
+          description: One distinct Keycloak principal ID per chain role; the assigning officer may not appear.
+          properties:
+            UNDERWRITER_PRIMARY: {type: string}
+            UNDERWRITER_SECONDARY: {type: string}
+            UNDERWRITER_TERTIARY: {type: string}
+            NIMASA_APPROVER: {type: string}
+            RECEIVING_BANK: {type: string}
+            BENEFICIARY: {type: string}
+    CvffReconciliationResolution:
+      type: object
+      required: [resolution]
+      properties:
+        resolution: {type: string, enum: [RESUME_DISBURSEMENT, REJECT]}
     CvffApprovalEvent:
       type: object
       required: [approval_id, application_id, role, principal_id, decision, from_state, to_state, created_at]

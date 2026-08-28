@@ -70,8 +70,8 @@ func (rate Rate) Confirm(checker string) (Rate, error) {
 // reference rate with deterministic half-up rounding. It fails closed on
 // overflow and on unconfirmed rates.
 func (rate Rate) ConvertUSDToNGN(usdMinor uint64) (uint64, error) {
-	if !rate.Confirmed {
-		return 0, errors.New("fx rate is not confirmed under dual control")
+	if err := rate.usable(); err != nil {
+		return 0, err
 	}
 	if usdMinor == 0 {
 		return 0, errors.New("usd amount must be non-zero")
@@ -86,4 +86,37 @@ func (rate Rate) ConvertUSDToNGN(usdMinor uint64) (uint64, error) {
 		return 0, ErrAmountOverflow
 	}
 	return quotient.Uint64(), nil
+}
+
+// ConvertNGNToUSD converts an NGN minor-unit amount into USD minor units at
+// the reference rate with deterministic half-up rounding: the exact form
+// floor((2*ngn*scale + rate) / (2*rate)) avoids any float math. It fails
+// closed on overflow, on unconfirmed rates and on amounts that convert to
+// zero (a disbursement leg must never silently vanish).
+func (rate Rate) ConvertNGNToUSD(ngnMinor uint64) (uint64, error) {
+	if err := rate.usable(); err != nil {
+		return 0, err
+	}
+	if ngnMinor == 0 {
+		return 0, errors.New("ngn amount must be non-zero")
+	}
+	// usd = ngn / (rate/scale); half-up: (2*ngn*scale + rate) / (2*rate).
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(ngnMinor), big.NewInt(2*MicroScale))
+	numerator.Add(numerator, new(big.Int).SetUint64(rate.NGNPerUSDMicro))
+	denominator := new(big.Int).Mul(big.NewInt(2), new(big.Int).SetUint64(rate.NGNPerUSDMicro))
+	quotient := numerator.Div(numerator, denominator)
+	if !quotient.IsUint64() || quotient.Sign() == 0 {
+		return 0, ErrAmountOverflow
+	}
+	return quotient.Uint64(), nil
+}
+
+func (rate Rate) usable() error {
+	if !rate.Confirmed {
+		return errors.New("fx rate is not confirmed under dual control")
+	}
+	if rate.NGNPerUSDMicro == 0 {
+		return ErrRateInvalid
+	}
+	return nil
 }

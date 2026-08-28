@@ -16,6 +16,7 @@ type ApplicationStore interface {
 	RecordDecision(ctx context.Context, applicationID string, expectedVersion int64, principalID string, decision cvff.Decision) (cvff.Application, cvff.Approval, error)
 	Transition(ctx context.Context, applicationID string, expectedVersion int64, move func(cvff.Application) (cvff.Application, error), eventType string) (cvff.Application, error)
 	RecordEscalation(ctx context.Context, applicationID string, tier cvff.UnderwritingTier, deadline time.Time) error
+	ResolveReconciliation(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution cvff.ReconciliationResolution) (cvff.Application, error)
 }
 
 // Disburser posts the FX-paired disbursement ledger entries. The production
@@ -60,7 +61,28 @@ func NewActivities(store ApplicationStore, disburser Disburser) (*Activities, er
 			return store.RecordEscalation(ctx, applicationID, tier, deadline)
 		},
 		Disburse: func(ctx context.Context, applicationID string) error {
-			return disburser.Disburse(ctx, applicationID)
+			if err := disburser.Disburse(ctx, applicationID); err != nil {
+				// The rail has already moved the application into the
+				// fail-closed RECONCILIATION_REQUIRED branch before returning
+				// this error; retrying the activity would only re-hit the
+				// state guard. Surface it non-retryable so the workflow
+				// parks on the reconciliation-resolution signal.
+				return temporal.NewNonRetryableApplicationError(
+					"cvff disbursement failed closed; application parked in RECONCILIATION_REQUIRED",
+					"cvff.disbursement-failed-closed", err)
+			}
+			return nil
+		},
+		ResolveReconciliation: func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution) (cvff.State, error) {
+			current, err := store.Get(ctx, applicationID)
+			if err != nil {
+				return "", err
+			}
+			updated, err := store.ResolveReconciliation(ctx, applicationID, current.Version, principalID, resolution)
+			if err != nil {
+				return "", activityError("resolve reconciliation", err)
+			}
+			return updated.State, nil
 		},
 		CommitAudit: func(ctx context.Context, applicationID string) error {
 			current, err := store.Get(ctx, applicationID)
@@ -84,7 +106,8 @@ func NewActivities(store ApplicationStore, disburser Disburser) (*Activities, er
 func activityError(operation string, err error) error {
 	if errors.Is(err, cvff.ErrRoleNotAssigned) || errors.Is(err, cvff.ErrRoleSeparation) ||
 		errors.Is(err, cvff.ErrSequenceViolation) || errors.Is(err, cvff.ErrTerminalState) ||
-		errors.Is(err, cvff.ErrInvalidState) || errors.Is(err, cvff.ErrNotFound) {
+		errors.Is(err, cvff.ErrInvalidState) || errors.Is(err, cvff.ErrNotFound) ||
+		errors.Is(err, cvff.ErrResolutionInvalid) {
 		return temporal.NewNonRetryableApplicationError(operation, "cvff-control-rejection", err)
 	}
 	return fmt.Errorf("%s: %w", operation, err)

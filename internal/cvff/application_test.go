@@ -53,6 +53,34 @@ func TestRoleAssignmentsEnforceSeparation(t *testing.T) {
 	}
 }
 
+func TestResolveReconciliationStateMachine(t *testing.T) {
+	parked := validApplication()
+	parked.State = StateReconciliationRequired
+	resumed, err := ResolveReconciliation(parked, ResolutionResumeDisbursement)
+	if err != nil || resumed.State != StateDisbursementPending {
+		t.Fatalf("resume = %+v %v", resumed, err)
+	}
+	rejected, err := ResolveReconciliation(parked, ResolutionReject)
+	if err != nil || rejected.State != StateRejected {
+		t.Fatalf("reject = %+v %v", rejected, err)
+	}
+	// Only the reconciliation branch may be resolved.
+	for _, state := range []State{StateSubmitted, StateUnderwritingPrimary, StateDisbursementPending, StateDisbursed, StateAudited, StateRejected} {
+		candidate := validApplication()
+		candidate.State = state
+		if _, err := ResolveReconciliation(candidate, ResolutionResumeDisbursement); !errors.Is(err, ErrSequenceViolation) {
+			t.Fatalf("resolution from %s error = %v", state, err)
+		}
+	}
+	// Unknown resolutions fail closed.
+	if _, err := ResolveReconciliation(parked, ReconciliationResolution("FORCE_APPROVE")); !errors.Is(err, ErrResolutionInvalid) {
+		t.Fatalf("unknown resolution error = %v", err)
+	}
+	if _, err := ResolveReconciliation(parked, ReconciliationResolution("")); !errors.Is(err, ErrResolutionInvalid) {
+		t.Fatalf("empty resolution error = %v", err)
+	}
+}
+
 func approveChain(t *testing.T, application Application) Application {
 	t.Helper()
 	assignments := validAssignments()

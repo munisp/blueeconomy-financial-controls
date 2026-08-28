@@ -72,6 +72,7 @@ func railFixture(t *testing.T) (*DisbursementRail, *stubLegsStore, *stubPairCrea
 		ApplicationID:     "cvff-001",
 		RateID:            "rate-1",
 		NGNPerUSDMicro:    1_550_250_000,
+		RateEffectiveDate: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC),
 		FeeTransferID:     tigerbeetle.ToUint128(101),
 		CostTransferID:    tigerbeetle.ToUint128(102),
 		FeeNGNMinor:       2_712_937_500,
@@ -179,19 +180,16 @@ type capturePairCreator struct{ target *ledger.DisbursementPairInput }
 
 func (creator *capturePairCreator) CreateDisbursementPair(input ledger.DisbursementPairInput) (ledger.DisbursementLegs, error) {
 	*creator.target = input
-	equivalent, err := input.Rate.ConvertUSDToNGN(input.CostUSDMinor)
-	if err != nil {
-		return ledger.DisbursementLegs{}, err
-	}
 	return ledger.DisbursementLegs{
 		ApplicationID:     input.ApplicationID,
 		RateID:            input.Rate.RateID,
 		NGNPerUSDMicro:    input.Rate.NGNPerUSDMicro,
+		RateEffectiveDate: input.Rate.EffectiveDate,
 		FeeTransferID:     tigerbeetle.ToUint128(101),
 		CostTransferID:    tigerbeetle.ToUint128(102),
 		FeeNGNMinor:       input.FeeNGNMinor,
 		CostUSDMinor:      input.CostUSDMinor,
-		CostNGNEquivalent: equivalent,
+		CostNGNEquivalent: input.CostNGNEquivalent,
 	}, nil
 }
 
@@ -221,21 +219,54 @@ func TestRailFailsClosedOnPairError(t *testing.T) {
 	}
 }
 
-func TestRailRejectsWrongStateAndCurrency(t *testing.T) {
-	rail, store, creator := railFixture(t)
+func TestRailRejectsWrongStateAndUnsupportedCurrency(t *testing.T) {
+	rail, store, _ := railFixture(t)
 	store.application.State = cvff.StateBankConfirmation
 	if err := rail.Disburse(context.Background(), "cvff-001"); err == nil {
 		t.Fatal("non-pending state disbursed")
 	}
-	rail, store, creator = railFixture(t)
-	store.application.Currency = "NGN"
+	rail, store, creator := railFixture(t)
+	store.application.Currency = "EUR"
 	if err := rail.Disburse(context.Background(), "cvff-001"); err == nil {
-		t.Fatal("NGN-cost application disbursed on USD rail")
+		t.Fatal("unsupported currency disbursed")
 	}
 	if creator.call != 0 {
-		t.Fatal("TigerBeetle write attempted for NGN-cost application")
+		t.Fatal("TigerBeetle write attempted for unsupported currency")
 	}
 	if store.application.State != cvff.StateReconciliationRequired {
 		t.Fatalf("state = %s, want RECONCILIATION_REQUIRED", store.application.State)
+	}
+}
+
+// TestRailDisbursesNGNWithCBNConversion: an NGN-denominated intake
+// application disburses with the USD cost leg converted at the captured CBN
+// reference rate; the conversion (rate ID, micro value, effective date) is
+// persisted with the legs for audit.
+func TestRailDisbursesNGNWithCBNConversion(t *testing.T) {
+	rail, store, _ := railFixture(t)
+	store.application.Currency = "NGN"
+	store.application.Amount = 1_085_175_000_000 // 7,000,000.00 USD at 1,550.25
+	var captured ledger.DisbursementPairInput
+	capturing := &capturePairCreator{target: &captured}
+	rail.pairs = capturing
+	if err := rail.Disburse(context.Background(), "cvff-001"); err != nil {
+		t.Fatalf("disburse NGN application: %v", err)
+	}
+	if captured.CostUSDMinor != 700_000_000 {
+		t.Fatalf("usd cost = %d cents, want 700000000", captured.CostUSDMinor)
+	}
+	if captured.CostNGNEquivalent != 1_085_175_000_000 {
+		t.Fatalf("ngn equivalent = %d, want the NGN principal", captured.CostNGNEquivalent)
+	}
+	// 25 bps of the NGN principal.
+	if captured.FeeNGNMinor != 2_712_937_500 {
+		t.Fatalf("fee = %d kobo, want 2712937500", captured.FeeNGNMinor)
+	}
+	legs, ok := store.legs["cvff-001"]
+	if !ok {
+		t.Fatal("legs not recorded")
+	}
+	if !legs.RateEffectiveDate.Equal(time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("rate effective date = %s", legs.RateEffectiveDate)
 	}
 }

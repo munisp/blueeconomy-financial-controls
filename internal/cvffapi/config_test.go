@@ -24,6 +24,7 @@ func validConfigEnv() map[string]string {
 		EnvTemporalHostPort:  "temporal:7233",
 		EnvTemporalNamespace: "blueeconomy",
 		EnvTemporalTaskQueue: "cvff-disbursement",
+		EnvPolicyDir:         "/etc/cvff/policies",
 	}
 }
 
@@ -45,7 +46,7 @@ func TestConfigFromEnvFailClosed(t *testing.T) {
 	for _, name := range []string{
 		EnvListenAddr, EnvDatabaseURL, EnvKeycloakIssuer, EnvKeycloakJWKS, EnvJWTAudience,
 		EnvAVScanURL, EnvMaxDocBytes, EnvMaxDocsPerApp, EnvDocContentTypes,
-		EnvTemporalHostPort, EnvTemporalNamespace, EnvTemporalTaskQueue,
+		EnvTemporalHostPort, EnvTemporalNamespace, EnvTemporalTaskQueue, EnvPolicyDir,
 	} {
 		env := validConfigEnv()
 		delete(env, name)

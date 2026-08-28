@@ -16,6 +16,10 @@ type Config struct {
 	Limits      Limits
 	AVScanURL   string
 	Temporal    TemporalConfig
+	// PolicyDir is the directory of .rego policy files the embedded OPA
+	// evaluator loads at startup; an unreadable or empty directory refuses
+	// the boot.
+	PolicyDir string
 }
 
 // TemporalConfig carries the fail-closed coordinates cvff-api uses to start
@@ -40,6 +44,7 @@ const (
 	EnvTemporalHostPort  = "TEMPORAL_HOST_PORT"
 	EnvTemporalNamespace = "TEMPORAL_NAMESPACE"
 	EnvTemporalTaskQueue = "TEMPORAL_TASK_QUEUE"
+	EnvPolicyDir         = "CVFF_API_POLICY_DIR"
 )
 
 // ConfigFromEnv resolves and validates the service configuration, failing
@@ -71,6 +76,7 @@ func ConfigFromEnv(lookup func(string) string) (Config, error) {
 	config.Temporal.HostPort = require(EnvTemporalHostPort)
 	config.Temporal.Namespace = require(EnvTemporalNamespace)
 	config.Temporal.TaskQueue = require(EnvTemporalTaskQueue)
+	config.PolicyDir = require(EnvPolicyDir)
 	if err != nil {
 		return Config{}, err
 	}

@@ -102,6 +102,7 @@ func registerActivities(cvffWorker worker.Worker, activities *workflow.Activitie
 	cvffWorker.RegisterActivityWithOptions(activities.RecordDecision, activityRegisterOptions(workflow.ActivityRecordDecision))
 	cvffWorker.RegisterActivityWithOptions(activities.RecordEscalation, activityRegisterOptions(workflow.ActivityRecordEscalation))
 	cvffWorker.RegisterActivityWithOptions(activities.Disburse, activityRegisterOptions(workflow.ActivityDisburse))
+	cvffWorker.RegisterActivityWithOptions(activities.ResolveReconciliation, activityRegisterOptions(workflow.ActivityResolveReconciliation))
 	cvffWorker.RegisterActivityWithOptions(activities.CommitAudit, activityRegisterOptions(workflow.ActivityCommitAudit))
 }
 

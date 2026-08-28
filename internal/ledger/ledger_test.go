@@ -27,6 +27,19 @@ func (client *fakeClient) CreateTransfers(transfers []tigerbeetle.Transfer) ([]t
 		return nil, client.transferErr
 	}
 	client.created = append(client.created, transfers...)
+	if client.lookups != nil {
+		for index, transfer := range transfers {
+			// Mirror the cluster: only transfers this call actually created
+			// become visible to later lookups; pre-existing ones (Exists) are
+			// seeded by the test itself.
+			if index < len(client.transferResults) && client.transferResults[index].Status != tigerbeetle.TransferCreated {
+				continue
+			}
+			if _, ok := client.lookups[transfer.ID]; !ok {
+				client.lookups[transfer.ID] = transfer
+			}
+		}
+	}
 	return client.transferResults, nil
 }
 
@@ -147,10 +160,16 @@ func disbursementInput(t *testing.T) DisbursementPairInput {
 	if err != nil {
 		t.Fatalf("confirm rate: %v", err)
 	}
+	// 100.00 USD at 1,550.25 NGN/USD = 15,502,500 kobo.
+	equivalent, err := confirmed.ConvertUSDToNGN(10_000)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
 	return DisbursementPairInput{
 		ApplicationID:      "cvff-001",
 		FeeNGNMinor:        1_000_000,
 		CostUSDMinor:       10_000,
+		CostNGNEquivalent:  equivalent,
 		Rate:               confirmed,
 		NGNDebitAccountID:  id(11),
 		NGNCreditAccountID: id(12),
@@ -182,6 +201,9 @@ func TestBuildDisbursementPair(t *testing.T) {
 	// 100.00 USD at 1,550.25 NGN/USD = 15,502,500 kobo.
 	if legs.CostNGNEquivalent != 15_502_500 {
 		t.Fatalf("ngn equivalent = %d", legs.CostNGNEquivalent)
+	}
+	if !legs.RateEffectiveDate.Equal(input.Rate.EffectiveDate) {
+		t.Fatalf("rate effective date = %s", legs.RateEffectiveDate)
 	}
 	// Deterministic idempotent IDs.
 	again, againLegs, err := BuildDisbursementPair(input)
@@ -225,6 +247,11 @@ func TestBuildDisbursementPairFailsClosed(t *testing.T) {
 	if _, _, err := BuildDisbursementPair(input); err == nil {
 		t.Fatal("same NGN debit/credit accepted")
 	}
+	input = disbursementInput(t)
+	input.CostNGNEquivalent = 0
+	if _, _, err := BuildDisbursementPair(input); err == nil {
+		t.Fatal("zero NGN equivalent accepted")
+	}
 }
 
 func TestCreateDisbursementPair(t *testing.T) {
@@ -241,16 +268,124 @@ func TestCreateDisbursementPair(t *testing.T) {
 		t.Fatalf("legs: %+v", legs)
 	}
 
-	failing := &fakeClient{transferResults: []tigerbeetle.CreateTransferResult{
-		{Status: tigerbeetle.TransferCreated},
-		{Status: tigerbeetle.TransferExists},
-	}}
-	if _, err := newService(t, failing).CreateDisbursementPair(disbursementInput(t)); err == nil {
-		t.Fatal("non-created status accepted")
-	}
-
 	errClient := &fakeClient{transferErr: errors.New("cluster unavailable")}
 	if _, err := newService(t, errClient).CreateDisbursementPair(disbursementInput(t)); err == nil {
 		t.Fatal("cluster error swallowed")
+	}
+}
+
+// TestCreateDisbursementPairExistsIsIdempotentSuccess covers the Temporal
+// activity retry after a TigerBeetle commit whose leg recording failed: the
+// deterministic transfer IDs come back as TransferExists and, because the
+// stored content matches the deterministic retry, the pair is a success.
+func TestCreateDisbursementPairExistsIsIdempotentSuccess(t *testing.T) {
+	input := disbursementInput(t)
+	transfers, _, err := BuildDisbursementPair(input)
+	if err != nil {
+		t.Fatalf("build pair: %v", err)
+	}
+	client := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{
+			{Status: tigerbeetle.TransferExists},
+			{Status: tigerbeetle.TransferCreated},
+		},
+		lookups: map[tigerbeetle.Uint128]tigerbeetle.Transfer{transfers[0].ID: transfers[0]},
+	}
+	legs, err := newService(t, client).CreateDisbursementPair(input)
+	if err != nil {
+		t.Fatalf("idempotent replay rejected: %v", err)
+	}
+	if legs.FeeTransferID != transfers[0].ID || legs.CostTransferID != transfers[1].ID {
+		t.Fatalf("legs after replay: %+v", legs)
+	}
+}
+
+// TestCreateDisbursementPairExistsMismatchIsConflict: TransferExists with
+// divergent stored content is a real conflict, never a silent success.
+func TestCreateDisbursementPairExistsMismatchIsConflict(t *testing.T) {
+	input := disbursementInput(t)
+	transfers, _, err := BuildDisbursementPair(input)
+	if err != nil {
+		t.Fatalf("build pair: %v", err)
+	}
+	divergent := transfers[1]
+	divergent.Amount = tigerbeetle.ToUint128(9_999_999)
+	client := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{
+			{Status: tigerbeetle.TransferCreated},
+			{Status: tigerbeetle.TransferExists},
+		},
+		lookups: map[tigerbeetle.Uint128]tigerbeetle.Transfer{transfers[1].ID: divergent},
+	}
+	if _, err := newService(t, client).CreateDisbursementPair(input); !errors.Is(err, ErrTransferConflict) {
+		t.Fatalf("divergent replay error = %v", err)
+	}
+
+	// An Exists report whose transfer lookup finds nothing is contradictory.
+	ghost := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{
+			{Status: tigerbeetle.TransferCreated},
+			{Status: tigerbeetle.TransferExists},
+		},
+		lookups: map[tigerbeetle.Uint128]tigerbeetle.Transfer{},
+	}
+	if _, err := newService(t, ghost).CreateDisbursementPair(input); !errors.Is(err, ErrTransferConflict) {
+		t.Fatalf("ghost transfer error = %v", err)
+	}
+
+	// Any other non-created status stays fatal.
+	fatal := &fakeClient{transferResults: []tigerbeetle.CreateTransferResult{
+		{Status: tigerbeetle.TransferCreated},
+		{Status: tigerbeetle.TransferExceedsCredits},
+	}}
+	if _, err := newService(t, fatal).CreateDisbursementPair(input); err == nil || errors.Is(err, ErrTransferConflict) {
+		t.Fatalf("non-created status error = %v", err)
+	}
+}
+
+// TestTransferRetryExists covers the two-phase rail: a retried reserve, post
+// or void whose deterministic transfer already committed with identical
+// content is idempotent success; divergence is a conflict.
+func TestTransferRetryExists(t *testing.T) {
+	reserve := tigerbeetle.Transfer{
+		ID:              id(1),
+		DebitAccountID:  id(2),
+		CreditAccountID: id(3),
+		Amount:          tigerbeetle.ToUint128(100),
+		Timeout:         60,
+		Ledger:          1,
+		Code:            1,
+		Flags:           tigerbeetle.TransferFlags{Pending: true}.ToUint16(),
+	}
+	retry := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{{Status: tigerbeetle.TransferExists}},
+		lookups:         map[tigerbeetle.Uint128]tigerbeetle.Transfer{id(1): reserve},
+	}
+	service := newService(t, retry)
+	if err := service.Reserve(id(1), id(2), id(3), 100, 60); err != nil {
+		t.Fatalf("reserve retry rejected: %v", err)
+	}
+	posted := tigerbeetle.Transfer{
+		ID:        id(9),
+		PendingID: id(1),
+		Ledger:    1,
+		Code:      1,
+		Flags:     tigerbeetle.TransferFlags{PostPendingTransfer: true}.ToUint16(),
+	}
+	retryPost := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{{Status: tigerbeetle.TransferExists}},
+		lookups:         map[tigerbeetle.Uint128]tigerbeetle.Transfer{id(9): posted},
+	}
+	if err := newService(t, retryPost).Post(id(9), id(1)); err != nil {
+		t.Fatalf("post retry rejected: %v", err)
+	}
+	divergent := reserve
+	divergent.Amount = tigerbeetle.ToUint128(50)
+	conflict := &fakeClient{
+		transferResults: []tigerbeetle.CreateTransferResult{{Status: tigerbeetle.TransferExists}},
+		lookups:         map[tigerbeetle.Uint128]tigerbeetle.Transfer{id(1): divergent},
+	}
+	if err := newService(t, conflict).Reserve(id(1), id(2), id(3), 100, 60); !errors.Is(err, ErrTransferConflict) {
+		t.Fatalf("divergent reserve retry error = %v", err)
 	}
 }

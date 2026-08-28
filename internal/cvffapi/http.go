@@ -20,9 +20,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
+	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
 )
 
-// Store is the persistence boundary used by the beneficiary API.
+// Store is the persistence boundary used by the CVFF API.
 type Store interface {
 	SubmitIntake(ctx context.Context, intake cvff.Intake) (cvff.ApplicationDetail, error)
 	GetForBeneficiary(ctx context.Context, applicationID string, beneficiaryID string) (cvff.ApplicationDetail, error)
@@ -33,6 +34,17 @@ type Store interface {
 	// DualLedgerReport is the auditor-facing NGN/USD disbursement report over
 	// the mandatory half-open window [from, to).
 	DualLedgerReport(ctx context.Context, from, to time.Time) ([]cvff.DualLedgerReport, error)
+	// Get loads one application by ID for the four-party pipeline routes.
+	Get(ctx context.Context, applicationID string) (cvff.Application, error)
+	// RoleAssignments returns the durable four-party bindings of one
+	// application.
+	RoleAssignments(ctx context.Context, applicationID string) (map[cvff.Role]string, error)
+	// AssignRoles binds the four-party roles on one application
+	// (idempotently; divergence conflicts).
+	AssignRoles(ctx context.Context, applicationID string, officerPrincipal string, assignments map[cvff.Role]string) (map[cvff.Role]string, error)
+	// ResolveReconciliation applies an officer resolution to the
+	// RECONCILIATION_REQUIRED branch.
+	ResolveReconciliation(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution cvff.ReconciliationResolution) (cvff.Application, error)
 }
 
 // Limits carries the approved upload quota and content rules. Every value is
@@ -63,20 +75,26 @@ func (limits Limits) validate() error {
 
 var contentTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$`)
 
-// Handler implements the CVFF beneficiary contract under /v1/cvff plus the
-// auditor-facing dual-ledger report under /v1/cvff/reports.
+// Handler implements the CVFF contract under /v1/cvff: the beneficiary
+// portal routes, the four-party pipeline routes (role assignment, party
+// decisions, reconciliation resolution) and the auditor-facing dual-ledger
+// report. Every route is gated by realm-role authentication and the PBAC
+// policy layer.
 type Handler struct {
-	store   Store
-	blobs   BlobStore
-	scanner Scanner
-	limits  Limits
-	starter WorkflowStarter
-	mux     *http.ServeMux
+	store    Store
+	blobs    BlobStore
+	scanner  Scanner
+	limits   Limits
+	starter  WorkflowStarter
+	signaler WorkflowSignaler
+	policy   *pbac.Enforcer
+	mux      *http.ServeMux
 }
 
 // NewHandler fails closed when any dependency is absent: there is no
-// default store, storage backend, scanner, quota or workflow starter.
-func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scanner Scanner, limits Limits, starter WorkflowStarter) (*Handler, error) {
+// default store, storage backend, scanner, quota, workflow starter,
+// workflow signaler or authorization policy.
+func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scanner Scanner, limits Limits, starter WorkflowStarter, signaler WorkflowSignaler, policy *pbac.Enforcer) (*Handler, error) {
 	if store == nil {
 		return nil, errors.New("cvff store is required")
 	}
@@ -92,21 +110,36 @@ func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scann
 	if starter == nil {
 		return nil, errors.New("workflow starter is required; applications must enter the disbursement rail")
 	}
+	if signaler == nil {
+		return nil, errors.New("workflow signaler is required; party decisions must reach the disbursement rail")
+	}
+	if policy == nil {
+		return nil, errors.New("authorization policy enforcer is required; requests are denied without one")
+	}
 	if err := limits.validate(); err != nil {
 		return nil, err
 	}
-	handler := &Handler{store: store, blobs: blobs, scanner: scanner, limits: limits, starter: starter, mux: http.NewServeMux()}
+	handler := &Handler{store: store, blobs: blobs, scanner: scanner, limits: limits, starter: starter, signaler: signaler, policy: policy, mux: http.NewServeMux()}
 	api := http.NewServeMux()
-	api.HandleFunc("GET /v1/cvff/applications", handler.listApplications)
-	api.HandleFunc("POST /v1/cvff/applications", handler.createApplication)
-	api.HandleFunc("GET /v1/cvff/applications/{application_id}", handler.getApplication)
-	api.HandleFunc("GET /v1/cvff/applications/{application_id}/events", handler.listEvents)
-	api.HandleFunc("GET /v1/cvff/applications/{application_id}/documents", handler.listDocuments)
-	api.HandleFunc("POST /v1/cvff/applications/{application_id}/documents", handler.uploadDocument)
-	auditorAPI := http.NewServeMux()
-	auditorAPI.HandleFunc("GET /v1/cvff/reports/dual-ledger", handler.dualLedgerReport)
+	api.Handle("GET /v1/cvff/applications", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.listApplications)))
+	api.Handle("POST /v1/cvff/applications", handler.requirePolicy("cvff.applications", "create", http.HandlerFunc(handler.createApplication)))
+	api.Handle("GET /v1/cvff/applications/{application_id}", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.getApplication)))
+	api.Handle("GET /v1/cvff/applications/{application_id}/events", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.listEvents)))
+	api.Handle("GET /v1/cvff/applications/{application_id}/documents", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.listDocuments)))
+	api.Handle("POST /v1/cvff/applications/{application_id}/documents", handler.requirePolicy("cvff.applications", "upload", http.HandlerFunc(handler.uploadDocument)))
 	handler.mux.HandleFunc("GET /healthz", handler.health)
-	handler.mux.Handle("/v1/cvff/reports/", RequireRole(authenticator, AuditorRole, auditorAPI))
+	handler.mux.Handle("GET /v1/cvff/reports/dual-ledger", RequireRole(authenticator, AuditorRole,
+		handler.requirePolicy("cvff.reports.dual-ledger", "read", http.HandlerFunc(handler.dualLedgerReport))))
+	// Four-party pipeline routes: role assignment and reconciliation are
+	// officer routes; decisions are open to any authenticated identity whose
+	// realm role the policy admits, with the per-application role binding
+	// enforced by the handler and again by the workflow activity.
+	handler.mux.Handle("PUT /v1/cvff/admin/applications/{application_id}/roles", RequireRole(authenticator, OfficerRole,
+		http.HandlerFunc(handler.assignRoles)))
+	handler.mux.Handle("POST /v1/cvff/admin/applications/{application_id}/reconciliation", RequireRole(authenticator, ReconciliationOfficerRole,
+		handler.requirePolicy("cvff.application.reconciliation", "resolve", http.HandlerFunc(handler.resolveReconciliation))))
+	handler.mux.Handle("POST /v1/cvff/applications/{application_id}/decisions", RequireAuthenticated(authenticator,
+		handler.requirePolicy("cvff.application", "decide", http.HandlerFunc(handler.recordDecision))))
 	handler.mux.Handle("/", RequireAuth(authenticator, api))
 	return handler, nil
 }

@@ -22,6 +22,9 @@ const (
 	SignalBankConfirmation = "cvff.bank-confirmation"
 	// SignalBeneficiaryConfirmation carries the beneficiary confirmation.
 	SignalBeneficiaryConfirmation = "cvff.beneficiary-confirmation"
+	// SignalReconciliationResolution carries a reconciliation officer's
+	// resolution while the workflow is parked in RECONCILIATION_REQUIRED.
+	SignalReconciliationResolution = "cvff.reconciliation-resolution"
 
 	// QueryState returns the current lifecycle state for observer replay.
 	QueryState = "cvff.state"
@@ -31,11 +34,12 @@ const (
 
 // Stable activity names: workflow histories reference these across deployments.
 const (
-	ActivityBeginUnderwriting = "cvff.begin-underwriting"
-	ActivityRecordDecision    = "cvff.record-decision"
-	ActivityRecordEscalation  = "cvff.record-escalation"
-	ActivityDisburse          = "cvff.disburse"
-	ActivityCommitAudit       = "cvff.commit-audit"
+	ActivityBeginUnderwriting      = "cvff.begin-underwriting"
+	ActivityRecordDecision         = "cvff.record-decision"
+	ActivityRecordEscalation       = "cvff.record-escalation"
+	ActivityDisburse               = "cvff.disburse"
+	ActivityResolveReconciliation  = "cvff.resolve-reconciliation"
+	ActivityCommitAudit            = "cvff.commit-audit"
 )
 
 // DecisionSignal is the payload for every party decision signal. PrincipalID
@@ -43,6 +47,13 @@ const (
 type DecisionSignal struct {
 	PrincipalID string        `json:"principal_id"`
 	Decision    cvff.Decision `json:"decision"`
+}
+
+// ResolutionSignal is the payload for a reconciliation officer's resolution
+// of the RECONCILIATION_REQUIRED branch.
+type ResolutionSignal struct {
+	PrincipalID string                        `json:"principal_id"`
+	Resolution  cvff.ReconciliationResolution `json:"resolution"`
 }
 
 // DisbursementInput starts a CVFFDisbursementWorkflow.
@@ -71,6 +82,9 @@ type Activities struct {
 	RecordEscalation func(ctx context.Context, applicationID string, tier cvff.UnderwritingTier, deadline time.Time) error
 	// Disburse posts the FX-paired disbursement ledger entries.
 	Disburse func(ctx context.Context, applicationID string) error
+	// ResolveReconciliation applies a reconciliation officer's resolution to
+	// the RECONCILIATION_REQUIRED branch and returns the resulting state.
+	ResolveReconciliation func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution) (cvff.State, error)
 	// CommitAudit closes the lifecycle for a disbursed application.
 	CommitAudit func(ctx context.Context, applicationID string) error
 }
@@ -157,8 +171,29 @@ func (workflowDef *CVFFWorkflow) CVFFDisbursementWorkflow(ctx workflow.Context, 
 	if result.State != cvff.StateDisbursementPending {
 		return result, fmt.Errorf("approval chain ended in %s, want %s", result.State, cvff.StateDisbursementPending)
 	}
-	if err := workflow.ExecuteActivity(ctx, ActivityDisburse, input.ApplicationID).Get(ctx, nil); err != nil {
-		return result, fmt.Errorf("disburse: %w", err)
+	for {
+		if err := workflow.ExecuteActivity(ctx, ActivityDisburse, input.ApplicationID).Get(ctx, nil); err == nil {
+			break
+		}
+		// The rail failed closed: the application now sits in
+		// RECONCILIATION_REQUIRED and only a reconciliation officer's
+		// resolution may move it. The workflow parks on the resolution
+		// signal instead of terminating, so a remediated application can
+		// resume disbursement; a REJECT resolution closes the chain.
+		result.State = cvff.StateReconciliationRequired
+		var resolution ResolutionSignal
+		workflow.GetSignalChannel(ctx, SignalReconciliationResolution).Receive(ctx, &resolution)
+		var resolved cvff.State
+		if err := workflow.ExecuteActivity(ctx, ActivityResolveReconciliation, input.ApplicationID, resolution.PrincipalID, resolution.Resolution).Get(ctx, &resolved); err != nil {
+			return result, fmt.Errorf("resolve reconciliation: %w", err)
+		}
+		result.State = resolved
+		if resolved == cvff.StateRejected {
+			return result, nil
+		}
+		if resolved != cvff.StateDisbursementPending {
+			return result, fmt.Errorf("reconciliation resolution ended in %s, want %s", resolved, cvff.StateDisbursementPending)
+		}
 	}
 
 	// Beneficiary confirmation of receipt closes the disbursement.
