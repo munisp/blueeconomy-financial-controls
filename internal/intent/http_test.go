@@ -77,9 +77,37 @@ func (store *fakeAPIStore) Approve(_ context.Context, intentID string, expectedV
 	return Approve(store.retained, checker)
 }
 
+// fakeResolver applies the officer-resolution rules in memory like the
+// orchestration Resolver (without the ledger leg, which the orchestration
+// tests cover).
+type fakeResolver struct {
+	err      error
+	officer  string
+	resolved Resolution
+}
+
+func (resolver *fakeResolver) ResolveAmbiguous(_ context.Context, _ string, expectedVersion int64, officer string, resolution Resolution) (Intent, error) {
+	if resolver.err != nil {
+		return Intent{}, resolver.err
+	}
+	current := Intent{CreateRequest: validRequest(), State: StateAmbiguous, Version: expectedVersion}
+	updated, err := ResolveAmbiguous(current, expectedVersion, officer, resolution)
+	if err != nil {
+		return Intent{}, err
+	}
+	resolver.officer = officer
+	resolver.resolved = resolution
+	return updated, nil
+}
+
 func newTestHandler(t *testing.T, store APIStore) http.Handler {
 	t.Helper()
-	handler, err := NewHandler(store, testAuthenticator(), testPolicy(t))
+	return newTestHandlerWithResolver(t, store, &fakeResolver{})
+}
+
+func newTestHandlerWithResolver(t *testing.T, store APIStore, resolver AmbiguousResolver) http.Handler {
+	t.Helper()
+	handler, err := NewHandler(store, testAuthenticator(), testPolicy(t), resolver)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -95,14 +123,17 @@ func authenticatedRequest(method, target, token, body string) *http.Request {
 }
 
 func TestHandlerRequiresDependencies(t *testing.T) {
-	if _, err := NewHandler(nil, testAuthenticator(), testPolicy(t)); err == nil {
+	if _, err := NewHandler(nil, testAuthenticator(), testPolicy(t), &fakeResolver{}); err == nil {
 		t.Fatal("nil store accepted")
 	}
-	if _, err := NewHandler(&fakeAPIStore{}, nil, testPolicy(t)); err == nil {
+	if _, err := NewHandler(&fakeAPIStore{}, nil, testPolicy(t), &fakeResolver{}); err == nil {
 		t.Fatal("nil authenticator accepted")
 	}
-	if _, err := NewHandler(&fakeAPIStore{}, testAuthenticator(), nil); err == nil {
+	if _, err := NewHandler(&fakeAPIStore{}, testAuthenticator(), nil, &fakeResolver{}); err == nil {
 		t.Fatal("nil policy accepted")
+	}
+	if _, err := NewHandler(&fakeAPIStore{}, testAuthenticator(), testPolicy(t), nil); err == nil {
+		t.Fatal("nil resolver accepted")
 	}
 }
 
@@ -235,7 +266,7 @@ func TestApproveMakerCannotBeCheckerEvenWithBothRoles(t *testing.T) {
 		"dual": {Subject: "maker-001", Roles: []string{IntentMakerRole, IntentCheckerRole}},
 	}}
 	store := &fakeAPIStore{}
-	handler, err := NewHandler(store, bothRoles, testPolicy(t))
+	handler, err := NewHandler(store, bothRoles, testPolicy(t), &fakeResolver{})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
@@ -306,6 +337,85 @@ func TestApproveRejectsBadInput(t *testing.T) {
 	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/approve", checkerToken, `{"expected_version":0}`))
 	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad approval = %d, want 422", recorder.Code)
+	}
+}
+
+func TestResolveUnauthenticated(t *testing.T) {
+	handler := newTestHandler(t, &fakeAPIStore{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", "", `{"expected_version":3,"resolution":"RECONCILE"}`))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated resolve = %d, want 401", recorder.Code)
+	}
+}
+
+func TestResolveForbiddenWithoutControllerRole(t *testing.T) {
+	handler := newTestHandler(t, &fakeAPIStore{})
+	for name, token := range map[string]string{"maker": makerToken, "checker": checkerToken} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", token, `{"expected_version":3,"resolution":"RECONCILE"}`))
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("%s resolve = %d, want 403", name, recorder.Code)
+		}
+	}
+}
+
+func TestResolveAmbiguousByOfficer(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		resolution Resolution
+		wantState  State
+	}{
+		"reconcile": {ResolutionReconcile, StateReconciliationRequired},
+		"void":      {ResolutionVoid, StateVoided},
+	} {
+		resolver := &fakeResolver{}
+		handler := newTestHandlerWithResolver(t, &fakeAPIStore{}, resolver)
+		recorder := httptest.NewRecorder()
+		body := `{"expected_version":3,"resolution":"` + string(testCase.resolution) + `"}`
+		handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", officerToken, body))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s resolve = %d: %s", name, recorder.Code, recorder.Body)
+		}
+		if resolver.officer != "officer-001" {
+			t.Fatalf("%s officer = %q, want verified token subject officer-001", name, resolver.officer)
+		}
+		var updated Intent
+		if err := decodeJSONBody(recorder, &updated); err != nil {
+			t.Fatalf("%s decode: %v", name, err)
+		}
+		if updated.State != testCase.wantState {
+			t.Fatalf("%s state = %s, want %s", name, updated.State, testCase.wantState)
+		}
+	}
+}
+
+func TestResolveRejectsInvalidResolution(t *testing.T) {
+	handler := newTestHandler(t, &fakeAPIStore{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", officerToken, `{"expected_version":3,"resolution":"FORCE_POST"}`))
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("invalid resolution = %d, want 422", recorder.Code)
+	}
+}
+
+func TestResolveConflicts(t *testing.T) {
+	for name, resolverErr := range map[string]error{
+		"not-ambiguous": ErrInvalidState,
+		"version":       ErrConflict,
+		"evidence":      ErrResolutionRejected,
+	} {
+		handler := newTestHandlerWithResolver(t, &fakeAPIStore{}, &fakeResolver{err: resolverErr})
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", officerToken, `{"expected_version":3,"resolution":"VOID"}`))
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("%s = %d, want 409", name, recorder.Code)
+		}
+	}
+	handler := newTestHandlerWithResolver(t, &fakeAPIStore{}, &fakeResolver{err: ErrNotFound})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/resolve", officerToken, `{"expected_version":3,"resolution":"VOID"}`))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing = %d, want 404", recorder.Code)
 	}
 }
 

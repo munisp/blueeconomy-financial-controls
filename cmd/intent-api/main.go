@@ -14,13 +14,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
+	"github.com/munisp/blueeconomy-financial-controls/internal/ledger"
+	"github.com/munisp/blueeconomy-financial-controls/internal/orchestration"
 	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 func main() {
@@ -53,7 +57,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("authorization policy: %w", err)
 	}
-	handler, err := intent.NewHandler(store, authenticator, policy)
+	// The officer-resolution route needs the TigerBeetle ledger: a VOID
+	// disposition must compensate any outstanding reservation, never edit
+	// state alone.
+	resolver, err := newResolver(ctx, store)
+	if err != nil {
+		return err
+	}
+	handler, err := intent.NewHandler(store, authenticator, policy, resolver)
 	if err != nil {
 		return err
 	}
@@ -77,4 +88,58 @@ func required(name string) string {
 		log.Fatalf("intent-api: %s is required", name)
 	}
 	return value
+}
+
+// newResolver builds the TigerBeetle-backed officer resolver. Every
+// coordinate is required; the process refuses to serve money routes without
+// the ledger the VOID disposition compensates against.
+func newResolver(ctx context.Context, store *intent.Store) (*orchestration.Resolver, error) {
+	clusterID, err := tigerbeetle.HexStringToUint128(required("TIGERBEETLE_CLUSTER_ID_HEX"))
+	if err != nil {
+		return nil, fmt.Errorf("parse TIGERBEETLE_CLUSTER_ID_HEX: %w", err)
+	}
+	replicas := strings.Split(required("TIGERBEETLE_REPLICA_ADDRESSES"), ",")
+	for index := range replicas {
+		replicas[index] = strings.TrimSpace(replicas[index])
+		if replicas[index] == "" {
+			return nil, errors.New("TIGERBEETLE_REPLICA_ADDRESSES contains an empty address")
+		}
+	}
+	client, err := tigerbeetle.NewClient(clusterID, replicas)
+	if err != nil {
+		return nil, fmt.Errorf("create TigerBeetle client: %w", err)
+	}
+	go func() {
+		<-ctx.Done()
+		client.Close()
+	}()
+	ledgerNumber, err := requiredUint("TIGERBEETLE_LEDGER")
+	if err != nil {
+		return nil, err
+	}
+	code, err := requiredUint("TIGERBEETLE_CODE")
+	if err != nil {
+		return nil, err
+	}
+	if ledgerNumber > uint64(^uint32(0)) || code > uint64(^uint16(0)) {
+		return nil, errors.New("TIGERBEETLE_LEDGER or TIGERBEETLE_CODE exceeds protocol width")
+	}
+	ledgerService, err := ledger.New(client, uint32(ledgerNumber), uint16(code))
+	if err != nil {
+		return nil, err
+	}
+	resolver, err := orchestration.NewResolver(store, ledgerService)
+	if err != nil {
+		return nil, err
+	}
+	return resolver, nil
+}
+
+func requiredUint(name string) (uint64, error) {
+	value := required(name)
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an unsigned integer", name)
+	}
+	return parsed, nil
 }

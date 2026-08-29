@@ -32,6 +32,20 @@ paths:
         '404': {description: Intent not found.}
         '409': {description: Version or maker/checker conflict.}
         '422': {description: Invalid approval.}
+  /v1/financial-intents/{intent_id}/resolve:
+    post:
+      operationId: resolveFinancialIntent
+      description: Officer resolution of an AMBIGUOUS intent (parked by the evidence-driven reconciler on contradictory or missing TigerBeetle evidence). Requires a Keycloak bearer token holding the financial-controller realm role and the PBAC financial.intents:resolve grant. The officer identity is the verified token subject, recorded in the financial_intent.officer_resolved audit event. RECONCILE returns the intent to RECONCILIATION_REQUIRED; VOID performs the compensating ledger handling first (any outstanding reservation is voided idempotently; an observed post transfer refuses the void with 409 — the money moved and the officer must reconcile instead).
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IntentID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OfficerResolution'}}}}
+      responses:
+        '200': {description: Intent resolved.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the financial-controller realm role or policy grant.}
+        '404': {description: Intent not found.}
+        '409': {description: Intent is not AMBIGUOUS, stale version, or the disposition conflicts with observed ledger evidence.}
+        '422': {description: Invalid resolution request.}
   /v1/cvff/applications:
     get:
       operationId: listCvffApplications
@@ -349,6 +363,14 @@ components:
       description: The checker is the verified bearer-token subject, recorded server-side and enforced distinct from the maker; the body carries no actor identity.
       properties:
         expected_version: {type: integer, minimum: 1}
+    OfficerResolution:
+      type: object
+      additionalProperties: false
+      required: [expected_version, resolution]
+      description: The officer is the verified bearer-token subject, recorded in the audit event; the body carries no actor identity.
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        resolution: {type: string, enum: [RECONCILE, VOID]}
     FSPIOPCallback:
       type: object
       description: Actual callback body is validated together with HTTP JWS/mTLS profile and durable state transition rules.

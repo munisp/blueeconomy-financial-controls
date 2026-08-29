@@ -181,12 +181,59 @@ func (store *Store) Transition(ctx context.Context, intentID string, expectedVer
 	return updated, nil
 }
 
+// officerResolutionEvent is the audit payload of an officer resolution: the
+// post-transition intent plus the verified officer identity and disposition.
+type officerResolutionEvent struct {
+	Intent     Intent     `json:"intent"`
+	Officer    string     `json:"officer"`
+	Resolution Resolution `json:"resolution"`
+}
+
+// ResolveAmbiguous records an officer disposition of an AMBIGUOUS intent and
+// emits the financial_intent.officer_resolved audit event. The transition is
+// validated twice (in memory and in the UPDATE predicate) and the officer
+// identity is the verified token subject supplied by the caller.
+func (store *Store) ResolveAmbiguous(ctx context.Context, intentID string, expectedVersion int64, officer string, resolution Resolution) (Intent, error) {
+	current, err := store.Get(ctx, intentID)
+	if err != nil {
+		return Intent{}, err
+	}
+	resolved, err := ResolveAmbiguous(current, expectedVersion, officer, resolution)
+	if err != nil {
+		return Intent{}, err
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return Intent{}, fmt.Errorf("begin officer resolution: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	updatedAt := time.Now().UTC()
+	updated, err := scanIntent(tx.QueryRow(ctx, `UPDATE financial_intents SET state = $1, updated_at = $2, version = version + 1 WHERE intent_id = $3 AND state = $4 AND version = $5 RETURNING intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker, checker, state, created_at, updated_at, version`, resolved.State, updatedAt, intentID, StateAmbiguous, expectedVersion))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Intent{}, ErrConflict
+	}
+	if err != nil {
+		return Intent{}, fmt.Errorf("resolve ambiguous financial intent: %w", err)
+	}
+	if err := appendEventPayload(ctx, tx, updated.IntentID, "financial_intent.officer_resolved", officerResolutionEvent{Intent: updated, Officer: officer, Resolution: resolution}, updatedAt); err != nil {
+		return Intent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Intent{}, fmt.Errorf("commit officer resolution: %w", err)
+	}
+	return updated, nil
+}
+
 func appendEvent(ctx context.Context, tx pgx.Tx, value Intent, eventType string, createdAt time.Time) error {
+	return appendEventPayload(ctx, tx, value.IntentID, eventType, value, createdAt)
+}
+
+func appendEventPayload(ctx context.Context, tx pgx.Tx, intentID string, eventType string, value any, createdAt time.Time) error {
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode financial event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO financial_intent_outbox (event_id, intent_id, event_type, payload, created_at) VALUES ($1,$2,$3,$4,$5)`, uuid.New(), value.IntentID, eventType, payload, createdAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO financial_intent_outbox (event_id, intent_id, event_type, payload, created_at) VALUES ($1,$2,$3,$4,$5)`, uuid.New(), intentID, eventType, payload, createdAt); err != nil {
 		return fmt.Errorf("write financial event: %w", err)
 	}
 	return nil

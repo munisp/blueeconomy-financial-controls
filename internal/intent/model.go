@@ -27,6 +27,24 @@ var (
 	ErrInvalidState      = errors.New("invalid financial intent state transition")
 	ErrMakerChecker      = errors.New("maker and checker must be distinct")
 	ErrImmutableConflict = errors.New("financial intent immutable fields conflict")
+	// ErrInvalidResolution marks an officer disposition outside the approved
+	// AMBIGUOUS resolutions.
+	ErrInvalidResolution = errors.New("resolution must be RECONCILE or VOID")
+	// ErrResolutionRejected marks an officer disposition contradicted by
+	// observed ledger evidence (e.g. VOID when the funds were posted).
+	ErrResolutionRejected = errors.New("resolution conflicts with observed ledger evidence")
+)
+
+// Resolution is the officer disposition of an AMBIGUOUS intent.
+type Resolution string
+
+const (
+	// ResolutionReconcile returns the intent to RECONCILIATION_REQUIRED so
+	// the evidence-driven reconciler re-examines it.
+	ResolutionReconcile Resolution = "RECONCILE"
+	// ResolutionVoid closes the intent VOIDED; any outstanding reservation
+	// is compensated in the ledger before the state is recorded.
+	ResolutionVoid Resolution = "VOID"
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -96,6 +114,37 @@ func Approve(current Intent, checker string) (Intent, error) {
 	return current, nil
 }
 
+// ResolveAmbiguous applies the officer disposition of an AMBIGUOUS intent.
+// AMBIGUOUS is produced only by the evidence-driven reconciler when the
+// observed TigerBeetle records are contradictory or absent; it is not a
+// terminal state — a financial controller must resolve it. The officer
+// identity is the verified token subject recorded for audit.
+func ResolveAmbiguous(current Intent, expectedVersion int64, officer string, resolution Resolution) (Intent, error) {
+	if current.State != StateAmbiguous {
+		return Intent{}, ErrInvalidState
+	}
+	if current.Version != expectedVersion {
+		return Intent{}, ErrConflict
+	}
+	if officer == "" || strings.TrimSpace(officer) != officer || len(officer) > 256 || !idPattern.MatchString(officer) {
+		return Intent{}, errors.New("officer is not canonical approved identifier text")
+	}
+	var next State
+	switch resolution {
+	case ResolutionReconcile:
+		next = StateReconciliationRequired
+	case ResolutionVoid:
+		next = StateVoided
+	default:
+		return Intent{}, ErrInvalidResolution
+	}
+	if !ValidOperationalTransition(current.State, next) {
+		return Intent{}, ErrInvalidState
+	}
+	current.State = next
+	return current, nil
+}
+
 func ValidOperationalTransition(current, next State) bool {
 	switch current {
 	case StateApproved:
@@ -106,6 +155,10 @@ func ValidOperationalTransition(current, next State) bool {
 		return next == StatePosted || next == StateVoided || next == StateAmbiguous || next == StateReconciliationRequired
 	case StateReconciliationRequired:
 		return next == StateReserved || next == StatePosted || next == StateVoided || next == StateAmbiguous
+	case StateAmbiguous:
+		// Officer-gated resolutions only: back to evidence-driven
+		// reconciliation, or closed VOIDED after compensating ledger handling.
+		return next == StateReconciliationRequired || next == StateVoided
 	default:
 		return false
 	}

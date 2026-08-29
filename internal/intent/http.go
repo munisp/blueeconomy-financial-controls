@@ -17,20 +17,30 @@ type APIStore interface {
 	Approve(ctx context.Context, intentID string, expectedVersion int64, checker string) (Intent, error)
 }
 
+// AmbiguousResolver applies officer dispositions to AMBIGUOUS intents,
+// including the compensating ledger handling a VOID disposition requires.
+// The orchestration Resolver implements it against the real TigerBeetle
+// ledger.
+type AmbiguousResolver interface {
+	ResolveAmbiguous(ctx context.Context, intentID string, expectedVersion int64, officer string, resolution Resolution) (Intent, error)
+}
+
 // Handler implements the openapi.yaml financial-intent contract. Every money
 // route is gated by Keycloak bearer verification, a realm-role binding and
-// the PBAC policy layer; actor identity (maker/checker) is derived from the
-// verified token subject only, never from the request body.
+// the PBAC policy layer; actor identity (maker/checker/officer) is derived
+// from the verified token subject only, never from the request body.
 type Handler struct {
 	store         APIStore
 	authenticator cvffapi.Authenticator
 	policy        *pbac.Enforcer
+	resolver      AmbiguousResolver
 	mux           *http.ServeMux
 }
 
 // NewHandler fails closed when any dependency is absent: there is no default
-// store, no default authenticator and no default authorization policy.
-func NewHandler(store APIStore, authenticator cvffapi.Authenticator, policy *pbac.Enforcer) (*Handler, error) {
+// store, no default authenticator, no default authorization policy and no
+// default officer resolver.
+func NewHandler(store APIStore, authenticator cvffapi.Authenticator, policy *pbac.Enforcer, resolver AmbiguousResolver) (*Handler, error) {
 	if store == nil {
 		return nil, errors.New("intent store is required")
 	}
@@ -40,10 +50,14 @@ func NewHandler(store APIStore, authenticator cvffapi.Authenticator, policy *pba
 	if policy == nil {
 		return nil, errors.New("authorization policy enforcer is required; requests are denied without one")
 	}
-	handler := &Handler{store: store, authenticator: authenticator, policy: policy, mux: http.NewServeMux()}
+	if resolver == nil {
+		return nil, errors.New("ambiguous-intent resolver is required; officer resolution must never be a state-only edit")
+	}
+	handler := &Handler{store: store, authenticator: authenticator, policy: policy, resolver: resolver, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.Handle("POST /v1/financial-intents", handler.requireAccess(IntentMakerRole, "create", handler.create))
 	handler.mux.Handle("POST /v1/financial-intents/{intent_id}/approve", handler.requireAccess(IntentCheckerRole, "approve", handler.approve))
+	handler.mux.Handle("POST /v1/financial-intents/{intent_id}/resolve", handler.requireAccess(FinancialControllerRole, "resolve", handler.resolve))
 	return handler, nil
 }
 
@@ -136,6 +150,47 @@ func (handler *Handler) approve(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusNotFound, err)
 		default:
 			writeError(writer, http.StatusInternalServerError, errors.New("approve financial intent"))
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, updated)
+}
+
+// resolutionRequest is the officer-resolution body contract. The officer is
+// the verified token subject, recorded in the audit event; the body carries
+// no actor identity.
+type resolutionRequest struct {
+	ExpectedVersion int64      `json:"expected_version"`
+	Resolution      Resolution `json:"resolution"`
+}
+
+func (handler *Handler) resolve(writer http.ResponseWriter, request *http.Request) {
+	principal := principalFrom(request.Context())
+	intentID := request.PathValue("intent_id")
+	if err := ValidateIdentifier("intent_id", intentID); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, err)
+		return
+	}
+	var payload resolutionRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if payload.ExpectedVersion <= 0 {
+		writeError(writer, http.StatusUnprocessableEntity, errors.New("expected_version is required"))
+		return
+	}
+	updated, err := handler.resolver.ResolveAmbiguous(request.Context(), intentID, payload.ExpectedVersion, principal.Subject, payload.Resolution)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrInvalidResolution):
+			writeError(writer, http.StatusUnprocessableEntity, err)
+		case errors.Is(err, ErrNotFound):
+			writeError(writer, http.StatusNotFound, err)
+		case errors.Is(err, ErrInvalidState), errors.Is(err, ErrConflict), errors.Is(err, ErrResolutionRejected):
+			writeError(writer, http.StatusConflict, err)
+		default:
+			writeError(writer, http.StatusInternalServerError, errors.New("resolve financial intent"))
 		}
 		return
 	}
