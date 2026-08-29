@@ -9,14 +9,29 @@ paths:
   /v1/financial-intents:
     post:
       operationId: createFinancialIntent
+      description: Creates one intent in DRAFT state. Requires a Keycloak bearer token holding the intent-maker realm role and the PBAC financial.intents:create grant. The maker is derived from the verified token subject; the body has no maker field and a body-supplied maker is rejected.
+      security: [{bearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FinancialIntentCreate'}}}}
-      responses: {'201': {description: Intent created.}, '409': {description: Idempotency conflict.}, '422': {description: Invalid intent.}}
+      responses:
+        '201': {description: Intent created.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-maker realm role or policy grant.}
+        '409': {description: Idempotency conflict.}
+        '422': {description: Invalid intent.}
   /v1/financial-intents/{intent_id}/approve:
     post:
       operationId: approveFinancialIntent
+      description: Approves one DRAFT intent. Requires a Keycloak bearer token holding the intent-checker realm role and the PBAC financial.intents:approve grant. The checker is derived from the verified token subject; the body has no checker field and a body-supplied checker is rejected. Maker != checker is enforced server-side on the verified principals (self-approval is a 409 even for a principal holding both roles).
+      security: [{bearerAuth: []}]
       parameters: [{$ref: '#/components/parameters/IntentID'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
-      responses: {'200': {description: Intent approved.}, '409': {description: Version or maker/checker conflict.}}
+      responses:
+        '200': {description: Intent approved.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-checker realm role or policy grant.}
+        '404': {description: Intent not found.}
+        '409': {description: Version or maker/checker conflict.}
+        '422': {description: Invalid approval.}
   /v1/cvff/applications:
     get:
       operationId: listCvffApplications
@@ -316,24 +331,24 @@ components:
     FinancialIntentCreate:
       type: object
       additionalProperties: false
-      required: [intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker]
+      required: [intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency]
+      description: The maker is the verified bearer-token subject, recorded server-side; the body carries no actor identity.
       properties:
         intent_id: {type: string, minLength: 1, maxLength: 256}
         external_ref: {type: string, minLength: 1, maxLength: 256}
         debit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
         credit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-        amount: {type: integer, minimum: 1}
+        amount: {type: integer, minimum: 1, description: Minor units of the ledger currency.}
         ledger: {type: integer, minimum: 1}
         code: {type: integer, minimum: 1}
-        currency: {type: string, pattern: '^[A-Z]{3}$'}
-        maker: {type: string, minLength: 1, maxLength: 256}
+        currency: {type: string, enum: [NGN, USD]}
     Approval:
       type: object
       additionalProperties: false
-      required: [expected_version, checker]
+      required: [expected_version]
+      description: The checker is the verified bearer-token subject, recorded server-side and enforced distinct from the maker; the body carries no actor identity.
       properties:
         expected_version: {type: integer, minimum: 1}
-        checker: {type: string, minLength: 1, maxLength: 256}
     FSPIOPCallback:
       type: object
       description: Actual callback body is validated together with HTTP JWS/mTLS profile and durable state transition rules.

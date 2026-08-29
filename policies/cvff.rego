@@ -27,6 +27,9 @@ role_clearance := {
 	"underwriter": "FIDUCIARY_SEGREGATED",
 	"nimasa-approver": "FIDUCIARY_SEGREGATED",
 	"receiving-bank": "FIDUCIARY_SEGREGATED",
+	"intent-maker": "FIDUCIARY_SEGREGATED",
+	"intent-checker": "FIDUCIARY_SEGREGATED",
+	"financial-controller": "FIDUCIARY_SEGREGATED",
 }
 
 principal_clearances contains clearance if {
@@ -119,6 +122,35 @@ route_ok if {
 	input.resource == "cvff.reports.dual-ledger"
 	input.action == "read"
 	has_role("auditor")
+}
+
+# Financial intents (TigerBeetle money movement): the maker creates, a
+# distinct checker approves (maker != checker is enforced server-side against
+# the verified token subjects, never against body fields), the maker may void
+# only own DRAFT intents, and only a financial controller may resolve an
+# AMBIGUOUS intent.
+route_ok if {
+	input.resource == "financial.intents"
+	input.action == "create"
+	has_role("intent-maker")
+}
+
+route_ok if {
+	input.resource == "financial.intents"
+	input.action == "approve"
+	has_role("intent-checker")
+}
+
+route_ok if {
+	input.resource == "financial.intents"
+	input.action == "void"
+	has_role("intent-maker")
+}
+
+route_ok if {
+	input.resource == "financial.intents"
+	input.action == "resolve"
+	has_role("financial-controller")
 }
 
 # Four-party segregation of duties: every chain role is bound exactly once,

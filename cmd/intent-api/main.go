@@ -1,7 +1,9 @@
 // intent-api serves the openapi.yaml financial-intent contract backed by the
-// durable PostgreSQL store. It fails closed without DATABASE_URL and a listen
-// address; the platform ingress terminates mTLS/OAuth (external manifest
-// inputs per the openapi description).
+// durable PostgreSQL store. Every money route is gated by Keycloak bearer
+// verification, a realm-role binding and the embedded PBAC policy layer;
+// actor identity (maker/checker) is derived from verified token claims only.
+// The process fails closed without DATABASE_URL, a listen address, the
+// Keycloak realm coordinates or a loadable policy directory.
 package main
 
 import (
@@ -16,7 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
+	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
 )
 
 func main() {
@@ -28,6 +32,12 @@ func main() {
 func run() error {
 	databaseURL := required("DATABASE_URL")
 	listenAddr := required("INTENT_API_LISTEN_ADDR")
+	keycloak := cvffapi.KeycloakConfig{
+		Issuer:   required("INTENT_API_KEYCLOAK_ISSUER"),
+		JWKSURL:  required("INTENT_API_KEYCLOAK_JWKS_URL"),
+		Audience: required("INTENT_API_JWT_AUDIENCE"),
+	}
+	policyDir := required("INTENT_API_POLICY_DIR")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	store, err := intent.Open(ctx, databaseURL)
@@ -35,7 +45,15 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	handler, err := intent.NewHandler(store)
+	authenticator, err := cvffapi.NewKeycloakAuthenticator(ctx, keycloak)
+	if err != nil {
+		return fmt.Errorf("keycloak authenticator: %w", err)
+	}
+	policy, err := pbac.LoadEnforcer(policyDir)
+	if err != nil {
+		return fmt.Errorf("authorization policy: %w", err)
+	}
+	handler, err := intent.NewHandler(store, authenticator, policy)
 	if err != nil {
 		return err
 	}
