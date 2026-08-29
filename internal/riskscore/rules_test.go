@@ -1,6 +1,7 @@
 package riskscore
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -138,9 +139,16 @@ func TestRequestValidation(t *testing.T) {
 	}
 }
 
+// allowAll is the test double for the scoring-logic tests in this file; the
+// authentication gate itself is covered against a real RS256/JWKS verifier in
+// auth_test.go.
+type allowAll struct{}
+
+func (allowAll) Authenticate(context.Context, string) error { return nil }
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	handler, err := NewHandler(testRules())
+	handler, err := NewHandler(testRules(), allowAll{})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
 	}
