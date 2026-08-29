@@ -18,15 +18,18 @@ func (telemetry *Telemetry) Middleware(operation string, next http.Handler) http
 		next.ServeHTTP(writer, request)
 		span := trace.SpanFromContext(request.Context())
 		SetBaggageAttributes(request.Context(), span)
-		if route := request.Pattern; route != "" {
-			span.SetName(route)
-		}
 	})
 	return otelhttp.NewHandler(inner, operation,
 		otelhttp.WithTracerProvider(telemetry.TracerProvider()),
 		otelhttp.WithMeterProvider(telemetry.MeterProvider()),
 		otelhttp.WithPropagators(telemetry.propagator),
+		// otelhttp re-applies the formatter after routing when
+		// request.Pattern is set, so the final span name is the matched
+		// route pattern (low cardinality), falling back to the method.
 		otelhttp.WithSpanNameFormatter(func(_ string, request *http.Request) string {
+			if request.Pattern != "" {
+				return request.Pattern
+			}
 			return request.Method
 		}),
 	)
