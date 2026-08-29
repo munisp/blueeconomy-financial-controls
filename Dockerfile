@@ -32,8 +32,11 @@ COPY --from=build /out/financial-reconcile /financial-reconcile
 USER nonroot:nonroot
 ENTRYPOINT ["/financial-reconcile"]
 
+# intent-api gates money routes with the embedded PBAC pack, baked into the
+# image (INTENT_API_POLICY_DIR=/etc/blueeconomy/policies).
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS intent-api
 COPY --from=build /out/intent-api /intent-api
+COPY policies/ /etc/blueeconomy/policies/
 USER nonroot:nonroot
 ENTRYPOINT ["/intent-api"]
 
@@ -41,3 +44,21 @@ FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b
 COPY --from=build /out/mojaloop-adapter /mojaloop-adapter
 USER nonroot:nonroot
 ENTRYPOINT ["/mojaloop-adapter"]
+
+# cvff-api serves /v1/cvff/applications* for the beneficiary portal. The PBAC
+# policy pack is baked into the image so CVFF_API_POLICY_DIR is self-contained
+# (the chart sets it to /etc/blueeconomy/policies).
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS cvff-api
+COPY --from=build /out/cvff-api /cvff-api
+COPY policies/ /etc/blueeconomy/policies/
+USER nonroot:nonroot
+ENTRYPOINT ["/cvff-api"]
+
+# declaration-scorer serves POST /v1/risk-scores for port-interoperability.
+# The versioned rules ship as config data baked into the image; an
+# operator-supplied DECLARATION_SCORER_RULES_PATH overrides.
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS declaration-scorer
+COPY --from=build /out/declaration-scorer /declaration-scorer
+COPY config/declaration-scorer-rules.json /etc/declaration-scorer/rules.json
+USER nonroot:nonroot
+ENTRYPOINT ["/declaration-scorer"]
