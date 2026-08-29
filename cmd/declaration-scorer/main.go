@@ -1,5 +1,8 @@
 // declaration-scorer serves POST /v1/risk-scores, the risk-scoring provider
-// behind DECLARATIONS_SCORER_URL consumed by blueeconomy-port-interoperability.
+// behind DECLARATIONS_SCORER_URL consumed by blueeconomy-port-interoperability,
+// and — when DECLARATION_SCORER_GRPC_LISTEN_ADDR is set — the Phase-7 gRPC
+// contract blueeconomy.riskscore.v1.RiskScoreService over the same scoring
+// core and the same Keycloak RS256 authentication.
 // Scoring is deterministic rules-based evaluation of versioned config data
 // (amount bands, HS-prefix risk, country risk, new-trader flags); every
 // response carries model_version and rule_based:true. The process fails
@@ -11,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -51,6 +55,33 @@ func run() error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
+	// Phase-7 (PRA-066..068): the gRPC RiskScoreService is served alongside
+	// HTTP when DECLARATION_SCORER_GRPC_LISTEN_ADDR is set, over the same
+	// scoring core and the same Keycloak RS256 authenticator (every RPC
+	// except the public health/reflection endpoints requires a verified
+	// token; the production profile still refuses to boot without the
+	// Keycloak triple above).
+	grpcListenAddr := strings.TrimSpace(os.Getenv("DECLARATION_SCORER_GRPC_LISTEN_ADDR"))
+	if grpcListenAddr != "" {
+		grpcServer, err := riskscore.NewGRPCServer(rules, authenticator)
+		if err != nil {
+			return fmt.Errorf("configure gRPC risk-scoring server: %w", err)
+		}
+		grpcListener, err := net.Listen("tcp", grpcListenAddr)
+		if err != nil {
+			return fmt.Errorf("bind gRPC listen address: %w", err)
+		}
+		go func() {
+			<-ctx.Done()
+			grpcServer.GracefulStop()
+		}()
+		go func() {
+			log.Printf("declaration-scorer: gRPC listening on %s (model %s, rule-based)", grpcListenAddr, rules.ModelVersion)
+			if err := grpcServer.Serve(grpcListener); err != nil {
+				log.Printf("declaration-scorer: gRPC server stopped: %v", err)
+			}
+		}()
+	}
 	log.Printf("declaration-scorer: listening on %s (model %s, rule-based)", listenAddr, rules.ModelVersion)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve declaration scorer: %w", err)
