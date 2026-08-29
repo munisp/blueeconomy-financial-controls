@@ -24,6 +24,7 @@ func TestRealPostgresRateExpiry(t *testing.T) {
 	defer store.Close()
 	for _, migrationPath := range []string{
 		filepath.Join("..", "..", "db", "migrations", "0001_financial_intents.sql"),
+		filepath.Join("..", "..", "db", "migrations", "0002_mojaloop_callbacks.sql"),
 		filepath.Join("..", "..", "db", "migrations", "0003_cvff_disbursement.sql"),
 		filepath.Join("..", "..", "db", "migrations", "0007_fc3_stranded_states.sql"),
 	} {

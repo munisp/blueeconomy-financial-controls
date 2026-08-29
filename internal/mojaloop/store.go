@@ -72,7 +72,12 @@ func (store *CallbackStore) SweepReservedTimeouts(ctx context.Context, ttl time.
 }
 
 func (store *CallbackStore) ApplyCallback(ctx context.Context, callback TransferCallback, body []byte) (TransferCallback, bool, error) {
-	if err := ValidateTransferCallback(nil, callback); err != nil {
+	// Entry validation is fields-only: the first-seen RESERVED policy of
+	// ValidateTransferCallback applies solely when no durable record exists
+	// (below). Applying it here rejected every follow-up COMMITTED/ABORTED
+	// callback — the happy path — because `previous` was always nil at this
+	// point. Caught by the Phase-6 Postgres integration tests.
+	if err := validateCallbackIdentity(callback); err != nil {
 		return TransferCallback{}, false, err
 	}
 	bodyDigest := sha256.Sum256(body)
@@ -86,6 +91,12 @@ func (store *CallbackStore) ApplyCallback(ctx context.Context, callback Transfer
 	var currentHash string
 	err = tx.QueryRow(ctx, `SELECT transfer_id, payer_fsp, payee_fsp, amount, currency, transfer_state, fulfilment, body_sha256 FROM mojaloop_transfer_callbacks WHERE transfer_id = $1 FOR UPDATE`, callback.TransferID).Scan(&current.TransferID, &current.PayerFSP, &current.PayeeFSP, &current.Amount, &current.Currency, &current.TransferState, &current.Fulfilment, &currentHash)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// No durable record: the first-seen policy applies — the rail must
+		// observe the reservation (funds locked) before any settlement or
+		// abandonment callback may be recorded.
+		if err := ValidateTransferCallback(nil, callback); err != nil {
+			return TransferCallback{}, false, err
+		}
 		now := time.Now().UTC()
 		if _, err := tx.Exec(ctx, `INSERT INTO mojaloop_transfer_callbacks (transfer_id, payer_fsp, payee_fsp, amount, currency, transfer_state, fulfilment, body_sha256, created_at, updated_at, version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,1)`, callback.TransferID, callback.PayerFSP, callback.PayeeFSP, callback.Amount, callback.Currency, callback.TransferState, callback.Fulfilment, bodyHash, now); err != nil {
 			return TransferCallback{}, false, fmt.Errorf("insert callback: %w", err)

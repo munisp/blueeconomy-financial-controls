@@ -185,9 +185,19 @@ type TransferCallback struct {
 	CompletedTimestamp string        `json:"completedTimestamp,omitempty"`
 }
 
-func ValidateTransferCallback(previous *TransferCallback, callback TransferCallback) error {
+// validateCallbackIdentity enforces the presence of the transfer identity
+// and amount fields. It is the entry validation for every callback,
+// regardless of whether a durable record already exists.
+func validateCallbackIdentity(callback TransferCallback) error {
 	if callback.TransferID == "" || callback.PayerFSP == "" || callback.PayeeFSP == "" || callback.Amount == "" || callback.Currency == "" {
 		return errors.New("transfer callback identity and amount are required")
+	}
+	return nil
+}
+
+func ValidateTransferCallback(previous *TransferCallback, callback TransferCallback) error {
+	if err := validateCallbackIdentity(callback); err != nil {
+		return err
 	}
 	if previous != nil && (previous.TransferID != callback.TransferID || previous.PayerFSP != callback.PayerFSP || previous.PayeeFSP != callback.PayeeFSP || previous.Amount != callback.Amount || previous.Currency != callback.Currency) {
 		return ErrTransferIdentityChange

@@ -24,7 +24,11 @@ func TestRealPostgresCallbackOrderingAndSweep(t *testing.T) {
 	}
 	defer store.Close()
 	for _, migrationPath := range []string{
+		// 0007 alters both fx_rates and mojaloop_transfer_callbacks, so the
+		// full chain is required (FC-3 made the sweep migration monolithic).
+		filepath.Join("..", "..", "db", "migrations", "0001_financial_intents.sql"),
 		os.Getenv("MOJALOOP_MIGRATION_PATH"),
+		filepath.Join("..", "..", "db", "migrations", "0003_cvff_disbursement.sql"),
 		filepath.Join("..", "..", "db", "migrations", "0007_fc3_stranded_states.sql"),
 	} {
 		migration, err := os.ReadFile(filepath.Clean(migrationPath))
