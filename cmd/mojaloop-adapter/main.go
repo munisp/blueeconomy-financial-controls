@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -95,6 +97,18 @@ func run() error {
 		return errors.New("MOJALOOP_TLS_CERT_FILE and MOJALOOP_TLS_KEY_FILE are required")
 	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
+	// FC-3: a RESERVED callback locks funds; without a timeout sweep it
+	// strands forever. The TTL is required (fail-closed) and the sweep marks
+	// expired reservations timed out with an audit event (local operational
+	// evidence; the Hub-signed terminal callback stays the state truth).
+	reservedTimeoutSeconds := os.Getenv("MOJALOOP_RESERVED_TIMEOUT_SECONDS")
+	reservedTimeout, err := strconv.Atoi(strings.TrimSpace(reservedTimeoutSeconds))
+	if err != nil || reservedTimeout <= 0 {
+		return errors.New("MOJALOOP_RESERVED_TIMEOUT_SECONDS must be a positive integer")
+	}
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	go runReservedTimeoutSweep(sweepCtx, callbackStore, time.Duration(reservedTimeout)*time.Second)
 	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
 	quoteHandler := mojaloop.QuoteCallbackHandler{VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedQuotePathPrefix: config.CallbackQuotePathPrefix}
 	mux := http.NewServeMux()
@@ -123,6 +137,43 @@ func run() error {
 		return err
 	}
 	return nil
+}
+
+// reservedSweepInterval bounds the sweep cadence to a quarter of the TTL,
+// clamped to [10s, 5m].
+func reservedSweepInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 4
+	if interval < 10*time.Second {
+		return 10 * time.Second
+	}
+	if interval > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return interval
+}
+
+func runReservedTimeoutSweep(ctx context.Context, store *mojaloop.CallbackStore, ttl time.Duration) {
+	sweep := func() {
+		expired, err := store.SweepReservedTimeouts(ctx, ttl, time.Now())
+		if err != nil {
+			log.Printf("mojaloop-adapter: reserved-timeout sweep failed: %v", err)
+			return
+		}
+		if expired > 0 {
+			log.Printf("mojaloop-adapter: marked %d RESERVED transfers timed out (ttl %s)", expired, ttl)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(reservedSweepInterval(ttl))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }
 
 func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {

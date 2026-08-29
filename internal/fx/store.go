@@ -38,7 +38,27 @@ func scanRate(row pgx.Row) (Rate, error) {
 	if state == "REJECTED" {
 		return Rate{}, ErrRateNotFound
 	}
+	if state == "EXPIRED" {
+		return Rate{}, ErrRateExpired
+	}
 	return retained, err
+}
+
+// ExpirePendingConfirmation moves every rate whose dual-control confirmation
+// window (ttl since entry) lapsed to the terminal EXPIRED state. Fail-closed:
+// an expired rate reads as ErrRateExpired and can never be confirmed or used;
+// there is no default rate. Returns the number of newly expired rates.
+func (store *Store) ExpirePendingConfirmation(ctx context.Context, ttl time.Duration, now time.Time) (int64, error) {
+	if ttl <= 0 {
+		return 0, errors.New("fx pending confirmation ttl must be positive")
+	}
+	result, err := store.pool.Exec(ctx, `
+		UPDATE fx_rates SET state = 'EXPIRED'
+		WHERE state = 'PENDING_CONFIRMATION' AND created_at < $1`, now.UTC().Add(-ttl))
+	if err != nil {
+		return 0, fmt.Errorf("expire pending fx rates: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 // Enter records a maker-entered rate awaiting dual-control confirmation.

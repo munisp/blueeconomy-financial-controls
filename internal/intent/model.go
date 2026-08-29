@@ -33,6 +33,9 @@ var (
 	// ErrResolutionRejected marks an officer disposition contradicted by
 	// observed ledger evidence (e.g. VOID when the funds were posted).
 	ErrResolutionRejected = errors.New("resolution conflicts with observed ledger evidence")
+	// ErrNotMaker marks a DRAFT void attempted by a principal other than the
+	// recorded maker.
+	ErrNotMaker = errors.New("only the maker may void a draft financial intent")
 )
 
 // Resolution is the officer disposition of an AMBIGUOUS intent.
@@ -145,8 +148,30 @@ func ResolveAmbiguous(current Intent, expectedVersion int64, officer string, res
 	return current, nil
 }
 
+// VoidDraft closes a DRAFT intent. Only the recorded maker may void, and
+// only while no reservation exists (DRAFT precedes any TigerBeetle
+// interaction, so there is nothing to compensate). The actor is the verified
+// token subject, matched against the durable maker.
+func VoidDraft(current Intent, expectedVersion int64, actor string) (Intent, error) {
+	if current.State != StateDraft {
+		return Intent{}, ErrInvalidState
+	}
+	if current.Version != expectedVersion {
+		return Intent{}, ErrConflict
+	}
+	if actor == "" || actor != current.Maker {
+		return Intent{}, ErrNotMaker
+	}
+	current.State = StateVoided
+	return current, nil
+}
+
 func ValidOperationalTransition(current, next State) bool {
 	switch current {
+	case StateDraft:
+		// Maker void only; the HTTP route and store enforce the actor
+		// binding. Every other DRAFT exit goes through approve.
+		return next == StateVoided
 	case StateApproved:
 		return next == StateReservationRequested
 	case StateReservationRequested:

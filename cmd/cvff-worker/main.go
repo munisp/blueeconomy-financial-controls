@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
 	"github.com/munisp/blueeconomy-financial-controls/internal/fx"
@@ -49,6 +50,16 @@ func run() error {
 		return err
 	}
 	defer rates.Close()
+
+	// FC-3: unconfirmed FX rates must not strand in PENDING_CONFIRMATION
+	// forever. The TTL is required (fail-closed) and the sweep expires any
+	// rate whose dual-control window lapsed; an expired rate is UNAVAILABLE,
+	// never a default rate.
+	pendingConfirmationTTL, err := requiredDuration("FX_PENDING_CONFIRMATION_TTL")
+	if err != nil {
+		return err
+	}
+	go runFXExpirySweep(ctx, rates, pendingConfirmationTTL)
 
 	clusterID, err := tigerbeetle.HexStringToUint128(required("TIGERBEETLE_CLUSTER_ID_HEX"))
 	if err != nil {
@@ -175,4 +186,53 @@ func uint64Env(name string) uint64 {
 		log.Fatalf("cvff-worker: %s is not an unsigned integer: %v", name, err)
 	}
 	return parsed
+}
+
+func requiredDuration(name string) (time.Duration, error) {
+	value := required(name)
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("cvff-worker: %s must be a positive Go duration (e.g. 24h)", name)
+	}
+	return parsed, nil
+}
+
+// fxExpiryInterval bounds the sweep cadence to a quarter of the TTL, clamped
+// to [1m, 1h] so a short TTL is still honoured and a long one does not spin.
+func fxExpiryInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 4
+	if interval < time.Minute {
+		return time.Minute
+	}
+	if interval > time.Hour {
+		return time.Hour
+	}
+	return interval
+}
+
+// runFXExpirySweep expires unconfirmed FX rates at startup and on the sweep
+// cadence until shutdown. A sweep failure is logged and retried on the next
+// tick; the conversion path itself stays fail-closed on expired rates.
+func runFXExpirySweep(ctx context.Context, rates *fx.Store, ttl time.Duration) {
+	sweep := func() {
+		expired, err := rates.ExpirePendingConfirmation(ctx, ttl, time.Now())
+		if err != nil {
+			log.Printf("cvff-worker: fx pending-confirmation sweep failed: %v", err)
+			return
+		}
+		if expired > 0 {
+			log.Printf("cvff-worker: expired %d unconfirmed fx rates (ttl %s)", expired, ttl)
+		}
+	}
+	sweep()
+	ticker := time.NewTicker(fxExpiryInterval(ttl))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }

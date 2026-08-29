@@ -15,6 +15,7 @@ import (
 type APIStore interface {
 	Create(ctx context.Context, request CreateRequest) (Intent, error)
 	Approve(ctx context.Context, intentID string, expectedVersion int64, checker string) (Intent, error)
+	VoidDraft(ctx context.Context, intentID string, expectedVersion int64, actor string) (Intent, error)
 }
 
 // AmbiguousResolver applies officer dispositions to AMBIGUOUS intents,
@@ -57,6 +58,7 @@ func NewHandler(store APIStore, authenticator cvffapi.Authenticator, policy *pba
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.Handle("POST /v1/financial-intents", handler.requireAccess(IntentMakerRole, "create", handler.create))
 	handler.mux.Handle("POST /v1/financial-intents/{intent_id}/approve", handler.requireAccess(IntentCheckerRole, "approve", handler.approve))
+	handler.mux.Handle("POST /v1/financial-intents/{intent_id}/void", handler.requireAccess(IntentMakerRole, "void", handler.voidDraft))
 	handler.mux.Handle("POST /v1/financial-intents/{intent_id}/resolve", handler.requireAccess(FinancialControllerRole, "resolve", handler.resolve))
 	return handler, nil
 }
@@ -150,6 +152,46 @@ func (handler *Handler) approve(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusNotFound, err)
 		default:
 			writeError(writer, http.StatusInternalServerError, errors.New("approve financial intent"))
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, updated)
+}
+
+// voidRequest is the DRAFT-void body contract. The actor is the verified
+// token subject and must be the recorded maker; the body carries no actor
+// identity.
+type voidRequest struct {
+	ExpectedVersion int64 `json:"expected_version"`
+}
+
+func (handler *Handler) voidDraft(writer http.ResponseWriter, request *http.Request) {
+	principal := principalFrom(request.Context())
+	intentID := request.PathValue("intent_id")
+	if err := ValidateIdentifier("intent_id", intentID); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, err)
+		return
+	}
+	var payload voidRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, err)
+		return
+	}
+	if payload.ExpectedVersion <= 0 {
+		writeError(writer, http.StatusUnprocessableEntity, errors.New("expected_version is required"))
+		return
+	}
+	updated, err := handler.store.VoidDraft(request.Context(), intentID, payload.ExpectedVersion, principal.Subject)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotMaker):
+			writeError(writer, http.StatusForbidden, err)
+		case errors.Is(err, ErrNotFound):
+			writeError(writer, http.StatusNotFound, err)
+		case errors.Is(err, ErrInvalidState), errors.Is(err, ErrConflict):
+			writeError(writer, http.StatusConflict, err)
+		default:
+			writeError(writer, http.StatusInternalServerError, errors.New("void draft financial intent"))
 		}
 		return
 	}

@@ -56,6 +56,7 @@ func testPolicy(t *testing.T) *pbac.Enforcer {
 type fakeAPIStore struct {
 	createErr  error
 	approveErr error
+	voidErr    error
 	retained   Intent
 }
 
@@ -75,6 +76,16 @@ func (store *fakeAPIStore) Approve(_ context.Context, intentID string, expectedV
 		return Intent{}, ErrNotFound
 	}
 	return Approve(store.retained, checker)
+}
+
+func (store *fakeAPIStore) VoidDraft(_ context.Context, intentID string, expectedVersion int64, actor string) (Intent, error) {
+	if store.voidErr != nil {
+		return Intent{}, store.voidErr
+	}
+	if store.retained.IntentID == "" {
+		return Intent{}, ErrNotFound
+	}
+	return VoidDraft(store.retained, expectedVersion, actor)
 }
 
 // fakeResolver applies the officer-resolution rules in memory like the
@@ -150,7 +161,7 @@ const validCreateBody = `{"intent_id":"intent-001","external_ref":"ref-001","deb
 func TestCreateIntentUnauthenticated(t *testing.T) {
 	handler := newTestHandler(t, &fakeAPIStore{})
 	for name, request := range map[string]*http.Request{
-		"no token":     authenticatedRequest(http.MethodPost, "/v1/financial-intents", "", validCreateBody),
+		"no token":      authenticatedRequest(http.MethodPost, "/v1/financial-intents", "", validCreateBody),
 		"unknown token": authenticatedRequest(http.MethodPost, "/v1/financial-intents", "forged-token", validCreateBody),
 	} {
 		recorder := httptest.NewRecorder()
@@ -337,6 +348,67 @@ func TestApproveRejectsBadInput(t *testing.T) {
 	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/approve", checkerToken, `{"expected_version":0}`))
 	if recorder.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad approval = %d, want 422", recorder.Code)
+	}
+}
+
+func TestVoidDraftUnauthenticated(t *testing.T) {
+	handler := newTestHandler(t, &fakeAPIStore{})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/void", "", `{"expected_version":1}`))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated void = %d, want 401", recorder.Code)
+	}
+}
+
+func TestVoidDraftByMaker(t *testing.T) {
+	store := &fakeAPIStore{}
+	handler := newTestHandler(t, store)
+	createDraft(t, handler, store)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/void", makerToken, `{"expected_version":1}`))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("maker void = %d: %s", recorder.Code, recorder.Body)
+	}
+	var updated Intent
+	if err := decodeJSONBody(recorder, &updated); err != nil {
+		t.Fatalf("decode void response: %v", err)
+	}
+	if updated.State != StateVoided {
+		t.Fatalf("state = %s, want VOIDED", updated.State)
+	}
+}
+
+func TestVoidDraftForbiddenForNonMaker(t *testing.T) {
+	store := &fakeAPIStore{}
+	handler := newTestHandler(t, store)
+	createDraft(t, handler, store)
+	// A different maker-role principal is authenticated and policy-cleared,
+	// but is not the recorded maker of this intent.
+	otherMaker := tokenAuthenticator{principals: map[string]cvffapi.Principal{
+		"other": {Subject: "maker-002", Roles: []string{IntentMakerRole}},
+	}}
+	otherHandler, err := NewHandler(store, otherMaker, testPolicy(t), &fakeResolver{})
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	otherHandler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/void", "other", `{"expected_version":1}`))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("non-maker void = %d, want 403", recorder.Code)
+	}
+}
+
+func TestVoidDraftConflicts(t *testing.T) {
+	for name, storeErr := range map[string]error{
+		"not-draft": ErrInvalidState,
+		"version":   ErrConflict,
+	} {
+		handler := newTestHandler(t, &fakeAPIStore{voidErr: storeErr})
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, authenticatedRequest(http.MethodPost, "/v1/financial-intents/intent-001/void", makerToken, `{"expected_version":1}`))
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("%s = %d, want 409", name, recorder.Code)
+		}
 	}
 }
 

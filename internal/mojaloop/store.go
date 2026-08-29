@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,6 +16,60 @@ import (
 type CallbackStore struct{ pool *pgxpool.Pool }
 
 func NewCallbackStore(pool *pgxpool.Pool) *CallbackStore { return &CallbackStore{pool: pool} }
+
+// SweepReservedTimeouts marks every RESERVED callback that has waited longer
+// than ttl as timed out and records one audit row per transfer in
+// mojaloop_callback_timeout_events. The sweep is idempotent (a transfer is
+// marked once) and honest: it never fabricates a Hub terminal state — the
+// callback stays RESERVED, the timeout is local operational evidence that
+// the locked funds need intervention. A later Hub-signed COMMITTED/ABORTED
+// remains acceptable terminal truth. Returns the number of newly timed-out
+// transfers.
+func (store *CallbackStore) SweepReservedTimeouts(ctx context.Context, ttl time.Duration, now time.Time) (int64, error) {
+	if ttl <= 0 {
+		return 0, errors.New("reserved timeout ttl must be positive")
+	}
+	cutoff := now.UTC().Add(-ttl)
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin reserved-timeout sweep: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT transfer_id, updated_at FROM mojaloop_transfer_callbacks WHERE transfer_state = $1 AND timed_out_at IS NULL AND updated_at < $2 ORDER BY transfer_id FOR UPDATE`, TransferReserved, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("find expired reserved callbacks: %w", err)
+	}
+	type expiredTransfer struct {
+		transferID    string
+		reservedSince time.Time
+	}
+	expired := make([]expiredTransfer, 0)
+	for rows.Next() {
+		var candidate expiredTransfer
+		if err := rows.Scan(&candidate.transferID, &candidate.reservedSince); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan expired reserved callback: %w", err)
+		}
+		expired = append(expired, candidate)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate expired reserved callbacks: %w", err)
+	}
+	markedAt := now.UTC()
+	for _, candidate := range expired {
+		if _, err := tx.Exec(ctx, `INSERT INTO mojaloop_callback_timeout_events (event_id, transfer_id, reserved_at, timed_out_at) VALUES ($1,$2,$3,$4)`, uuid.New(), candidate.transferID, candidate.reservedSince, markedAt); err != nil {
+			return 0, fmt.Errorf("write reserved-timeout audit: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE mojaloop_transfer_callbacks SET timed_out_at = $1, version = version + 1 WHERE transfer_id = $2 AND timed_out_at IS NULL`, markedAt, candidate.transferID); err != nil {
+			return 0, fmt.Errorf("mark reserved callback timed out: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit reserved-timeout sweep: %w", err)
+	}
+	return int64(len(expired)), nil
+}
 
 func (store *CallbackStore) ApplyCallback(ctx context.Context, callback TransferCallback, body []byte) (TransferCallback, bool, error) {
 	if err := ValidateTransferCallback(nil, callback); err != nil {

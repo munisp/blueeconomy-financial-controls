@@ -32,6 +32,20 @@ paths:
         '404': {description: Intent not found.}
         '409': {description: Version or maker/checker conflict.}
         '422': {description: Invalid approval.}
+  /v1/financial-intents/{intent_id}/void:
+    post:
+      operationId: voidFinancialIntent
+      description: Voids one DRAFT intent. Requires a Keycloak bearer token holding the intent-maker realm role and the PBAC financial.intents:void grant, and the verified token subject must be the recorded maker (a different maker-role principal is a 403). Only DRAFT intents can be voided here — no reservation exists yet, so no ledger compensation is needed; AMBIGUOUS intents are voided through the officer-resolution route. Emits the financial_intent.voided audit event.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IntentID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
+      responses:
+        '200': {description: Intent voided.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-maker realm role or policy grant, or the caller is not the recorded maker.}
+        '404': {description: Intent not found.}
+        '409': {description: Intent is not DRAFT or stale version.}
+        '422': {description: Invalid void request.}
   /v1/financial-intents/{intent_id}/resolve:
     post:
       operationId: resolveFinancialIntent

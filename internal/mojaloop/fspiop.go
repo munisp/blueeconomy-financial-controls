@@ -193,7 +193,13 @@ func ValidateTransferCallback(previous *TransferCallback, callback TransferCallb
 		return ErrTransferIdentityChange
 	}
 	if previous == nil {
-		if callback.TransferState != TransferReserved && callback.TransferState != TransferCommitted && callback.TransferState != TransferAborted {
+		// First-seen policy (fail-closed): the durable record of a transfer
+		// always begins at RESERVED, the state in which funds are locked.
+		// A first-seen COMMITTED/ABORTED would mean money settled (or was
+		// abandoned) without this rail ever observing the reservation, so it
+		// is rejected as an invalid transition; the Hub must deliver the
+		// RESERVED callback first (replays are idempotent on the body hash).
+		if callback.TransferState != TransferReserved {
 			return ErrInvalidTransferState
 		}
 		return nil

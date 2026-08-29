@@ -181,6 +181,46 @@ func (store *Store) Transition(ctx context.Context, intentID string, expectedVer
 	return updated, nil
 }
 
+// voidedEvent is the audit payload of a maker DRAFT void: the post-transition
+// intent plus the verified actor (the maker).
+type voidedEvent struct {
+	Intent Intent `json:"intent"`
+	Actor  string `json:"actor"`
+}
+
+// VoidDraft records a maker void of a DRAFT intent and emits the
+// financial_intent.voided audit event. The maker binding is enforced in
+// memory and again by the UPDATE predicate (defence in depth).
+func (store *Store) VoidDraft(ctx context.Context, intentID string, expectedVersion int64, actor string) (Intent, error) {
+	current, err := store.Get(ctx, intentID)
+	if err != nil {
+		return Intent{}, err
+	}
+	if _, err := VoidDraft(current, expectedVersion, actor); err != nil {
+		return Intent{}, err
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return Intent{}, fmt.Errorf("begin draft void: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	updatedAt := time.Now().UTC()
+	updated, err := scanIntent(tx.QueryRow(ctx, `UPDATE financial_intents SET state = $1, updated_at = $2, version = version + 1 WHERE intent_id = $3 AND state = $4 AND version = $5 AND maker = $6 RETURNING intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker, checker, state, created_at, updated_at, version`, StateVoided, updatedAt, intentID, StateDraft, expectedVersion, actor))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Intent{}, ErrConflict
+	}
+	if err != nil {
+		return Intent{}, fmt.Errorf("void draft financial intent: %w", err)
+	}
+	if err := appendEventPayload(ctx, tx, updated.IntentID, "financial_intent.voided", voidedEvent{Intent: updated, Actor: actor}, updatedAt); err != nil {
+		return Intent{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Intent{}, fmt.Errorf("commit draft void: %w", err)
+	}
+	return updated, nil
+}
+
 // officerResolutionEvent is the audit payload of an officer resolution: the
 // post-transition intent plus the verified officer identity and disposition.
 type officerResolutionEvent struct {

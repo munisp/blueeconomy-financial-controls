@@ -106,3 +106,29 @@ func TestTransferCallbackStateMachine(t *testing.T) {
 		t.Fatal("identical committed replay rejected: ", err)
 	}
 }
+
+func TestTransferCallbackFirstSeenPolicy(t *testing.T) {
+	base := TransferCallback{TransferIdentity: TransferIdentity{TransferID: "transfer-002", PayerFSP: "FMMBE", PayeeFSP: "PARTNER01", Amount: "100", Currency: "NGN"}}
+	reserved := base
+	reserved.TransferState = TransferReserved
+	if err := ValidateTransferCallback(nil, reserved); err != nil {
+		t.Fatalf("first-seen RESERVED rejected: %v", err)
+	}
+	// Fail-closed ordering: money must never settle (or abort) before this
+	// rail observed the reservation that locked the funds.
+	committed := base
+	committed.TransferState = TransferCommitted
+	if err := ValidateTransferCallback(nil, committed); err != ErrInvalidTransferState {
+		t.Fatalf("first-seen COMMITTED error = %v, want ErrInvalidTransferState", err)
+	}
+	aborted := base
+	aborted.TransferState = TransferAborted
+	if err := ValidateTransferCallback(nil, aborted); err != ErrInvalidTransferState {
+		t.Fatalf("first-seen ABORTED error = %v, want ErrInvalidTransferState", err)
+	}
+	unknown := base
+	unknown.TransferState = "PENDING"
+	if err := ValidateTransferCallback(nil, unknown); err != ErrInvalidTransferState {
+		t.Fatalf("first-seen unknown state error = %v, want ErrInvalidTransferState", err)
+	}
+}

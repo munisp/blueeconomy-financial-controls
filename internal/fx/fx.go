@@ -22,6 +22,9 @@ var (
 	ErrRateNotFound   = errors.New("no confirmed CBN reference rate for the disbursement date")
 	ErrRateConflict   = errors.New("fx rate changed concurrently")
 	ErrAmountOverflow = errors.New("fx conversion overflows ledger amount width")
+	// ErrRateExpired marks a rate whose dual-control confirmation window
+	// lapsed; an expired rate is unavailable, never a default rate.
+	ErrRateExpired = errors.New("fx rate expired unconfirmed and is unavailable")
 )
 
 // Rate is one CBN reference rate entry. It becomes usable only after a second
