@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/riskscore"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 func main() {
@@ -40,6 +41,15 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	pipeline, err := setupTelemetry(ctx, "declaration-scorer")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("declaration-scorer: telemetry shutdown failed: %v", err)
+		}
+	}()
 	authenticator, err := authenticatorFromEnv(ctx)
 	if err != nil {
 		return err
@@ -48,7 +58,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: listenAddr, Handler: pipeline.Middleware("declaration-scorer", handler), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -63,7 +73,7 @@ func run() error {
 	// Keycloak triple above).
 	grpcListenAddr := strings.TrimSpace(os.Getenv("DECLARATION_SCORER_GRPC_LISTEN_ADDR"))
 	if grpcListenAddr != "" {
-		grpcServer, err := riskscore.NewGRPCServer(rules, authenticator)
+		grpcServer, err := riskscore.NewGRPCServer(rules, authenticator, pipeline)
 		if err != nil {
 			return fmt.Errorf("configure gRPC risk-scoring server: %w", err)
 		}
@@ -87,6 +97,27 @@ func run() error {
 		return fmt.Errorf("serve declaration scorer: %w", err)
 	}
 	return nil
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment. An
+// absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("declaration-scorer: telemetry enabled (otlp endpoint %s)", config.Endpoint)
+	} else {
+		log.Printf("declaration-scorer: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
+	}
+	return pipeline, nil
 }
 
 func required(name string) string {

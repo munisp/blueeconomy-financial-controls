@@ -19,9 +19,11 @@ type fxRateSource interface {
 	ConfirmedForDate(ctx context.Context, date time.Time) (fx.Rate, error)
 }
 
-// pairCreator posts the FX-paired disbursement transfers to TigerBeetle.
+// pairCreator posts the FX-paired disbursement transfers to TigerBeetle. The
+// traced variant carries the activity context so the ledger client spans join
+// the workflow trace (OTEL_DESIGN §3: TigerBeetle coverage is client-side).
 type pairCreator interface {
-	CreateDisbursementPair(input ledger.DisbursementPairInput) (ledger.DisbursementLegs, error)
+	CreateDisbursementPairTraced(ctx context.Context, input ledger.DisbursementPairInput) (ledger.DisbursementLegs, error)
 }
 
 // disbursementStore is the CVFF persistence boundary used by the rail.
@@ -137,7 +139,7 @@ func (rail *DisbursementRail) Disburse(ctx context.Context, applicationID string
 	default:
 		return rail.failClosed(ctx, application, fmt.Errorf("application currency %q is not an approved ledger currency (NGN, USD)", application.Currency))
 	}
-	legs, err := rail.pairs.CreateDisbursementPair(ledger.DisbursementPairInput{
+	legs, err := rail.pairs.CreateDisbursementPairTraced(ctx, ledger.DisbursementPairInput{
 		ApplicationID:      applicationID,
 		FeeNGNMinor:        fee,
 		CostUSDMinor:       costUSDMinor,

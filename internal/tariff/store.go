@@ -104,7 +104,7 @@ func (store *Store) Assess(ctx context.Context, request AssessRequest, idempoten
 	if err != nil {
 		return Assessment{}, err
 	}
-	computation := Compute(request, rates, exemptions, asOf)
+	computation := ComputeTraced(ctx, request, rates, exemptions, asOf)
 	usdTotal, ngnTotal := computation.Totals()
 	assessment := Assessment{
 		AssessmentID:  uuid.NewString(),

@@ -10,13 +10,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := telemetry.Default().NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
@@ -133,6 +137,12 @@ func (store *Store) RoleAssignments(ctx context.Context, applicationID string) (
 // role assignments, persists the immutable approval entry, advances state and
 // writes an outbox event in one transaction.
 func (store *Store) RecordDecision(ctx context.Context, applicationID string, expectedVersion int64, principalID string, decision Decision) (Application, Approval, error) {
+	// Maker/checker decision span (OTEL_DESIGN §2): the four-party decision
+	// gate is audit-critical, so every decision attempt is traced with its
+	// outcome; principal identity stays off the span.
+	ctx, span := telemetry.Default().StartSpan(ctx, "cvff.decision", trace.SpanKindInternal,
+		attribute.String("cvff.decision", string(decision)))
+	defer span.End()
 	current, err := store.Get(ctx, applicationID)
 	if err != nil {
 		return Application{}, Approval{}, err
@@ -146,9 +156,17 @@ func (store *Store) RecordDecision(ctx context.Context, applicationID string, ex
 	}
 	updated, approval, err := ApplyDecision(current, assignments, principalID, decision)
 	if err != nil {
+		span.RecordError(err)
 		return Application{}, Approval{}, err
 	}
-	return store.commitDecision(ctx, current, updated, approval, expectedVersion)
+	span.SetAttributes(attribute.String("cvff.decision.role", string(approval.Role)))
+	committed, committedApproval, err := store.commitDecision(ctx, current, updated, approval, expectedVersion)
+	if err != nil {
+		span.RecordError(err)
+		return Application{}, Approval{}, err
+	}
+	span.SetAttributes(attribute.String("cvff.application.state", string(committed.State)))
+	return committed, committedApproval, nil
 }
 
 func (store *Store) commitDecision(ctx context.Context, current, updated Application, approval Approval, expectedVersion int64) (Application, Approval, error) {

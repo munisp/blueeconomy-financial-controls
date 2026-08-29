@@ -19,6 +19,7 @@ import (
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
 	"github.com/munisp/blueeconomy-financial-controls/internal/mojaloop"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 func main() {
@@ -67,6 +68,15 @@ func run() error {
 			return readErr
 		}
 	}
+	pipeline, err := setupTelemetry(context.Background(), "mojaloop-adapter")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("mojaloop-adapter: telemetry shutdown failed: %v", err)
+		}
+	}()
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return errors.New("DATABASE_URL is required")
@@ -124,7 +134,7 @@ func run() error {
 			Mode   string `json:"mode"`
 		}{Status: "ok", Mode: config.Mode})
 	})
-	server := &http.Server{Addr: address, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
+	server := &http.Server{Addr: address, Handler: pipeline.Middleware("mojaloop-adapter", mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.RequestTimeout, WriteTimeout: config.RequestTimeout, IdleTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -200,6 +210,27 @@ func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {
 		return nil, errors.New("callback verification key is not RSA")
 	}
 	return key, nil
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment.
+// An absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("%s: telemetry enabled (otlp endpoint %s)", serviceName, config.Endpoint)
+	} else {
+		log.Printf("%s: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)", serviceName)
+	}
+	return pipeline, nil
 }
 
 func parseRSAPrivateKey(data []byte) (*rsa.PrivateKey, error) {

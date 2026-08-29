@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/tariff"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 func main() {
@@ -38,7 +39,16 @@ func run(logger *slog.Logger) error {
 		return errors.New("TARIFF_MIGRATION_PATH is required")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pipeline, err := setupTelemetry(ctx, logger, "tariff-engine")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			logger.Error("telemetry shutdown failed", "error", err)
+		}
+	}()
+	pool, err := pipeline.NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("open postgres pool: %w", err)
 	}
@@ -60,7 +70,7 @@ func run(logger *slog.Logger) error {
 	}
 	server := &http.Server{
 		Addr:              listenAddr,
-		Handler:           handler,
+		Handler:           pipeline.Middleware("tariff-engine", handler),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -68,6 +78,27 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("tariff engine listening", "addr", listenAddr)
 	return server.ListenAndServe()
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment. An
+// absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, logger *slog.Logger, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		logger.Info("telemetry enabled", "otlp_endpoint", config.Endpoint)
+	} else {
+		logger.Info("telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
+	}
+	return pipeline, nil
 }
 
 // applyMigration executes the migration file, following the repo's

@@ -8,6 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 // Store persists CBN reference rates under dual control.
@@ -16,7 +19,7 @@ type Store struct{ pool *pgxpool.Pool }
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := telemetry.Default().NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
@@ -81,11 +84,16 @@ func (store *Store) Enter(ctx context.Context, rate Rate) (Rate, error) {
 // Confirm applies the checker half of dual control. The database unique index
 // permits at most one confirmed rate per effective date.
 func (store *Store) Confirm(ctx context.Context, rateID string, checker string) (Rate, error) {
+	// Maker/checker decision span: dual-control confirmation is a money-path
+	// gate, so every confirmation attempt is traced with its outcome.
+	ctx, span := telemetry.Default().StartSpan(ctx, "fx.confirm", trace.SpanKindInternal)
+	defer span.End()
 	current, err := store.get(ctx, rateID)
 	if err != nil {
 		return Rate{}, err
 	}
 	if _, err := current.Confirm(checker); err != nil {
+		span.RecordError(err)
 		return Rate{}, err
 	}
 	retained, err := scanRate(store.pool.QueryRow(ctx, `

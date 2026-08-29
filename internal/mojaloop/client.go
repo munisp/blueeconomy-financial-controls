@@ -161,13 +161,19 @@ func sleep(ctx context.Context, delay time.Duration) error {
 }
 
 func (client Client) PostQuotes(ctx context.Context, quoteID string, body []byte) (*http.Response, error) {
-	return client.Do(ctx, http.MethodPost, "/quotes/"+quoteID, body)
+	return client.clientSpan(ctx, "mojaloop.quote", "fspiop.quote_id", quoteID, func(ctx context.Context) (*http.Response, error) {
+		return client.Do(ctx, http.MethodPost, "/quotes/"+quoteID, body)
+	})
 }
 
 func (client Client) PostTransfers(ctx context.Context, body []byte) (*http.Response, error) {
-	return client.Do(ctx, http.MethodPost, "/transfers", body)
+	return client.clientSpan(ctx, "mojaloop.transfer", "", "", func(ctx context.Context) (*http.Response, error) {
+		return client.Do(ctx, http.MethodPost, "/transfers", body)
+	})
 }
 
 func (client Client) GetTransfer(ctx context.Context, transferID string) (*http.Response, error) {
-	return client.Do(ctx, http.MethodGet, "/transfers/"+transferID, nil)
+	return client.clientSpan(ctx, "mojaloop.transfer.lookup", "fspiop.transfer_id", transferID, func(ctx context.Context) (*http.Response, error) {
+		return client.Do(ctx, http.MethodGet, "/transfers/"+transferID, nil)
+	})
 }

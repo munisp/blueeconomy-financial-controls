@@ -64,7 +64,7 @@ func (resolver *Resolver) ResolveAmbiguous(ctx context.Context, intentID string,
 		return resolver.store.ResolveAmbiguous(ctx, intentID, expectedVersion, officer, resolution)
 	}
 	postID := deterministicID("post", intentID)
-	if _, postFound, lookupErr := resolver.ledger.LookupTransfer(postID); lookupErr != nil {
+	if _, postFound, lookupErr := resolver.ledger.LookupTransferTraced(ctx, postID); lookupErr != nil {
 		return intent.Intent{}, fmt.Errorf("lookup post transfer: %w", lookupErr)
 	} else if postFound {
 		// The money observably moved; voiding would erase a real movement.
@@ -72,18 +72,18 @@ func (resolver *Resolver) ResolveAmbiguous(ctx context.Context, intentID string,
 	}
 	pendingID := deterministicID("pending", intentID)
 	voidID := deterministicID("void", intentID)
-	_, pendingFound, err := resolver.ledger.LookupTransfer(pendingID)
+	_, pendingFound, err := resolver.ledger.LookupTransferTraced(ctx, pendingID)
 	if err != nil {
 		return intent.Intent{}, fmt.Errorf("lookup pending transfer: %w", err)
 	}
-	_, voidFound, err := resolver.ledger.LookupTransfer(voidID)
+	_, voidFound, err := resolver.ledger.LookupTransferTraced(ctx, voidID)
 	if err != nil {
 		return intent.Intent{}, fmt.Errorf("lookup void transfer: %w", err)
 	}
 	if pendingFound && !voidFound {
 		// Compensating handling: release the locked reservation before the
 		// intent is recorded VOIDED.
-		if voidErr := resolver.ledger.Void(voidID, pendingID); voidErr != nil {
+		if voidErr := resolver.ledger.VoidTraced(ctx, voidID, pendingID); voidErr != nil {
 			return intent.Intent{}, fmt.Errorf("void pending reservation: %w", voidErr)
 		}
 	}

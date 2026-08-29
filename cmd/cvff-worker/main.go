@@ -18,10 +18,12 @@ import (
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
 	"github.com/munisp/blueeconomy-financial-controls/internal/fx"
 	"github.com/munisp/blueeconomy-financial-controls/internal/ledger"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 	"github.com/munisp/blueeconomy-financial-controls/internal/workflow"
 	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 	"go.temporal.io/sdk/activity"
 	temporalclient "go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -39,6 +41,22 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	pipeline, err := setupTelemetry(ctx, "cvff-worker")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("cvff-worker: telemetry shutdown failed: %v", err)
+		}
+	}()
+	// Temporal SDK OTel interceptors: workflow/activity spans join the
+	// service trace and the trace context rides inside Temporal payloads.
+	temporalInterceptor, err := pipeline.TemporalInterceptor()
+	if err != nil {
+		return err
+	}
 
 	store, err := cvff.Open(ctx, databaseURL)
 	if err != nil {
@@ -92,13 +110,19 @@ func run() error {
 		return err
 	}
 
-	temporalClient, err := temporalclient.Dial(temporalclient.Options{HostPort: hostPort, Namespace: namespace})
+	temporalClient, err := temporalclient.Dial(temporalclient.Options{
+		HostPort:     hostPort,
+		Namespace:    namespace,
+		Interceptors: []interceptor.ClientInterceptor{temporalInterceptor},
+	})
 	if err != nil {
 		return fmt.Errorf("dial Temporal: %w", err)
 	}
 	defer temporalClient.Close()
 
-	cvffWorker := worker.New(temporalClient, taskQueue, worker.Options{})
+	cvffWorker := worker.New(temporalClient, taskQueue, worker.Options{
+		Interceptors: []interceptor.WorkerInterceptor{temporalInterceptor},
+	})
 	cvffWorker.RegisterWorkflow(definition.CVFFDisbursementWorkflow)
 	registerActivities(cvffWorker, activities)
 	log.Printf("cvff-worker: listening on task queue %s (namespace %s)", taskQueue, namespace)
@@ -106,6 +130,27 @@ func run() error {
 		return fmt.Errorf("run Temporal worker: %w", err)
 	}
 	return nil
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment.
+// An absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// worker boots exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("%s: telemetry enabled (otlp endpoint %s)", serviceName, config.Endpoint)
+	} else {
+		log.Printf("%s: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)", serviceName)
+	}
+	return pipeline, nil
 }
 
 func registerActivities(cvffWorker worker.Worker, activities *workflow.Activities) {

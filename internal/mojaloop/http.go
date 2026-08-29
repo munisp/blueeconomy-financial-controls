@@ -47,12 +47,16 @@ func (handler QuoteCallbackHandler) ServeHTTP(response http.ResponseWriter, requ
 		http.Error(response, "invalid quote path", http.StatusBadRequest)
 		return
 	}
+	spanCtx, span := fspiopSpan(request.Context(), request.Header, "mojaloop.callback.quote", "fspiop.quote_id", quoteID)
+	defer span.End()
 	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
 	if err != nil {
 		http.Error(response, "request body unavailable", http.StatusBadRequest)
 		return
 	}
-	if err := VerifyRequestWithKeyID(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey, handler.ExpectedVerificationKeyID); err != nil {
+	if err := verifySpan(spanCtx, func() error {
+		return VerifyRequestWithKeyID(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey, handler.ExpectedVerificationKeyID)
+	}); err != nil {
 		http.Error(response, "invalid FSPIOP signature", http.StatusUnauthorized)
 		return
 	}
@@ -91,12 +95,16 @@ func (handler CallbackHandler) ServeHTTP(response http.ResponseWriter, request *
 		http.Error(response, "invalid transfer path", http.StatusBadRequest)
 		return
 	}
+	spanCtx, span := fspiopSpan(request.Context(), request.Header, "mojaloop.callback.transfer", "fspiop.transfer_id", transferID)
+	defer span.End()
 	body, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
 	if err != nil {
 		http.Error(response, "request body unavailable", http.StatusBadRequest)
 		return
 	}
-	if err := VerifyRequestWithKeyID(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey, handler.ExpectedVerificationKeyID); err != nil {
+	if err := verifySpan(spanCtx, func() error {
+		return VerifyRequestWithKeyID(request.Method, request.URL.RequestURI(), request.Header.Get("FSPIOP-Source"), request.Header.Get("FSPIOP-Destination"), body, request.Header.Get(signatureHeader), handler.VerificationKey, handler.ExpectedVerificationKeyID)
+	}); err != nil {
 		http.Error(response, "invalid FSPIOP signature", http.StatusUnauthorized)
 		return
 	}

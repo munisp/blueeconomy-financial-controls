@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	riskscorev1 "github.com/munisp/blueeconomy-contracts/gen/go/blueeconomy/riskscore/v1"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -95,15 +96,26 @@ func unaryAuthInterceptor(auth Authenticator) grpc.UnaryServerInterceptor {
 // NewGRPCServer builds the gRPC server for RiskScoreService with the health
 // and reflection endpoints registered (public per the contract). It fails
 // closed exactly like NewHandler: invalid rules or a missing authenticator
-// are construction errors — there is no unauthenticated scoring path.
-func NewGRPCServer(rules Rules, auth Authenticator) (*grpc.Server, error) {
+// are construction errors — there is no unauthenticated scoring path. The
+// pipeline may be nil (telemetry disabled): every RPC then still gets a
+// (non-recording) span over a noop provider. When a pipeline is supplied, the
+// otelgrpc stats handler joins every scoring RPC span to the caller trace via
+// the gRPC metadata carrier, and the baggage interceptor stamps tenant.id and
+// agency onto the server span before authentication runs.
+func NewGRPCServer(rules Rules, auth Authenticator, pipeline *telemetry.Telemetry) (*grpc.Server, error) {
 	if err := rules.Validate(); err != nil {
 		return nil, err
 	}
 	if auth == nil {
 		return nil, errors.New("riskscore: an authenticator is required")
 	}
-	server := grpc.NewServer(grpc.ChainUnaryInterceptor(unaryAuthInterceptor(auth)))
+	if pipeline == nil {
+		pipeline = telemetry.Default()
+	}
+	server := grpc.NewServer(
+		pipeline.GRPCServerOption(),
+		grpc.ChainUnaryInterceptor(telemetry.UnaryBaggageAttributesInterceptor(), unaryAuthInterceptor(auth)),
+	)
 	riskscorev1.RegisterRiskScoreServiceServer(server, &grpcService{rules: rules})
 	healthServer := health.NewServer()
 	healthServer.SetServingStatus(riskscorev1.RiskScoreService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)

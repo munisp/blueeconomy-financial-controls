@@ -17,6 +17,7 @@ import (
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
 	"github.com/munisp/blueeconomy-financial-controls/internal/ledger"
 	"github.com/munisp/blueeconomy-financial-controls/internal/orchestration"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
@@ -29,6 +30,20 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	telemetryConfig, err := telemetry.LoadConfig("financial-orchestrator")
+	if err != nil {
+		fail(fmt.Errorf("load telemetry config: %w", err))
+	}
+	pipeline, err := telemetry.Setup(ctx, telemetryConfig)
+	if err != nil {
+		fail(fmt.Errorf("setup telemetry: %w", err))
+	}
+	telemetry.InstallDefault(pipeline)
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("financial-orchestrator: telemetry shutdown failed: %v", err)
+		}
+	}()
 	databaseURL := required("DATABASE_URL")
 	store, err := intent.Open(ctx, databaseURL)
 	if err != nil {

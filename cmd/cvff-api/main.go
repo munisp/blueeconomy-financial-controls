@@ -18,13 +18,36 @@ import (
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvff"
 	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
 	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 	temporalclient "go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
 )
 
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("cvff-api: %v", err)
 	}
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment.
+// An absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("%s: telemetry enabled (otlp endpoint %s)", serviceName, config.Endpoint)
+	} else {
+		log.Printf("%s: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)", serviceName)
+	}
+	return pipeline, nil
 }
 
 func run() error {
@@ -34,6 +57,20 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	pipeline, err := setupTelemetry(ctx, "cvff-api")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("cvff-api: telemetry shutdown failed: %v", err)
+		}
+	}()
+	temporalInterceptor, err := pipeline.TemporalInterceptor()
+	if err != nil {
+		return err
+	}
 
 	store, err := cvff.Open(ctx, config.DatabaseURL)
 	if err != nil {
@@ -54,8 +91,9 @@ func run() error {
 		return err
 	}
 	temporalClient, err := temporalclient.Dial(temporalclient.Options{
-		HostPort:  config.Temporal.HostPort,
-		Namespace: config.Temporal.Namespace,
+		HostPort:     config.Temporal.HostPort,
+		Namespace:    config.Temporal.Namespace,
+		Interceptors: []interceptor.ClientInterceptor{temporalInterceptor},
 	})
 	if err != nil {
 		return fmt.Errorf("dial Temporal: %w", err)
@@ -77,7 +115,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: config.ListenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: config.ListenAddr, Handler: pipeline.Middleware("cvff-api", handler), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -10,13 +10,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	pool, err := telemetry.Default().NewPGXPool(ctx, databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
@@ -118,6 +121,11 @@ func (store *Store) Get(ctx context.Context, intentID string) (Intent, error) {
 }
 
 func (store *Store) Approve(ctx context.Context, intentID string, expectedVersion int64, checker string) (Intent, error) {
+	// Maker/checker decision span: the checker approval is the gate that
+	// releases an intent into orchestration, so it is traced with its
+	// outcome; maker/checker identity stays off the span.
+	ctx, span := telemetry.Default().StartSpan(ctx, "intent.approve", trace.SpanKindInternal)
+	defer span.End()
 	current, err := store.Get(ctx, intentID)
 	if err != nil {
 		return Intent{}, err
@@ -127,6 +135,7 @@ func (store *Store) Approve(ctx context.Context, intentID string, expectedVersio
 	}
 	approved, err := Approve(current, checker)
 	if err != nil {
+		span.RecordError(err)
 		return Intent{}, err
 	}
 	tx, err := store.pool.Begin(ctx)

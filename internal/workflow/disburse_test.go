@@ -27,7 +27,7 @@ type stubPairCreator struct {
 	call int
 }
 
-func (creator *stubPairCreator) CreateDisbursementPair(ledger.DisbursementPairInput) (ledger.DisbursementLegs, error) {
+func (creator *stubPairCreator) CreateDisbursementPairTraced(_ context.Context, _ ledger.DisbursementPairInput) (ledger.DisbursementLegs, error) {
 	creator.call++
 	return creator.legs, creator.err
 }
@@ -178,7 +178,7 @@ func TestRailFeeComputation(t *testing.T) {
 
 type capturePairCreator struct{ target *ledger.DisbursementPairInput }
 
-func (creator *capturePairCreator) CreateDisbursementPair(input ledger.DisbursementPairInput) (ledger.DisbursementLegs, error) {
+func (creator *capturePairCreator) CreateDisbursementPairTraced(_ context.Context, input ledger.DisbursementPairInput) (ledger.DisbursementLegs, error) {
 	*creator.target = input
 	return ledger.DisbursementLegs{
 		ApplicationID:     input.ApplicationID,

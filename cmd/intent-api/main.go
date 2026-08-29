@@ -24,6 +24,7 @@ import (
 	"github.com/munisp/blueeconomy-financial-controls/internal/ledger"
 	"github.com/munisp/blueeconomy-financial-controls/internal/orchestration"
 	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
@@ -44,6 +45,15 @@ func run() error {
 	policyDir := required("INTENT_API_POLICY_DIR")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	pipeline, err := setupTelemetry(ctx, "intent-api")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("intent-api: telemetry shutdown failed: %v", err)
+		}
+	}()
 	store, err := intent.Open(ctx, databaseURL)
 	if err != nil {
 		return err
@@ -68,7 +78,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	server := &http.Server{Addr: listenAddr, Handler: pipeline.Middleware("intent-api", handler), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -80,6 +90,27 @@ func run() error {
 		return fmt.Errorf("serve intent API: %w", err)
 	}
 	return nil
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment.
+// An absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("%s: telemetry enabled (otlp endpoint %s)", serviceName, config.Endpoint)
+	} else {
+		log.Printf("%s: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)", serviceName)
+	}
+	return pipeline, nil
 }
 
 func required(name string) string {

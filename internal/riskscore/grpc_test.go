@@ -30,7 +30,7 @@ func startGRPCFixture(t *testing.T) *grpcFixture {
 	t.Helper()
 	jwks := newJWKSFixture(t)
 	rules := testRules()
-	server, err := NewGRPCServer(rules, jwks.authenticator(t))
+	server, err := NewGRPCServer(rules, jwks.authenticator(t), nil)
 	if err != nil {
 		t.Fatalf("build gRPC server: %v", err)
 	}
@@ -159,10 +159,10 @@ func TestGRPCHealthEndpointIsPublic(t *testing.T) {
 }
 
 func TestNewGRPCServerFailsClosed(t *testing.T) {
-	if _, err := NewGRPCServer(testRules(), nil); err == nil {
+	if _, err := NewGRPCServer(testRules(), nil, nil); err == nil {
 		t.Fatal("gRPC server accepted a nil authenticator")
 	}
-	if _, err := NewGRPCServer(Rules{}, allowAll{}); err == nil {
+	if _, err := NewGRPCServer(Rules{}, allowAll{}, nil); err == nil {
 		t.Fatal("gRPC server accepted unloaded rules")
 	}
 }
