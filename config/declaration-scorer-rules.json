@@ -1,0 +1,33 @@
+{
+  "model_version": "rules-2026.09.1",
+  "amount_bands": [
+    {"max_minor": 50000000, "points": 0},
+    {"max_minor": 500000000, "points": 10},
+    {"max_minor": 5000000000, "points": 20},
+    {"max_minor": null, "points": 35}
+  ],
+  "hs_prefix_risk": [
+    {"prefix": "03", "points": 15, "reason": "fish and seafood (perishable, IUU-fishing exposure)"},
+    {"prefix": "24", "points": 40, "reason": "tobacco (excise fraud exposure)"},
+    {"prefix": "27", "points": 30, "reason": "mineral fuels (sanctions exposure)"},
+    {"prefix": "71", "points": 45, "reason": "precious metals and stones (value-transfer exposure)"},
+    {"prefix": "87", "points": 20, "reason": "vehicles (valuation dispute exposure)"},
+    {"prefix": "93", "points": 60, "reason": "arms and ammunition (export control)"}
+  ],
+  "country_risk": [
+    {"country": "NG", "points": 10},
+    {"country": "GH", "points": 8},
+    {"country": "CI", "points": 8},
+    {"country": "CM", "points": 12},
+    {"country": "LR", "points": 15},
+    {"country": "SL", "points": 15},
+    {"country": "VE", "points": 25},
+    {"country": "MM", "points": 25},
+    {"country": "AF", "points": 30},
+    {"country": "YE", "points": 30}
+  ],
+  "sanctioned_countries": ["KP", "IR", "CU", "SY"],
+  "known_trader_ids": [],
+  "new_trader_points": 25,
+  "aeo_discount_points": 15
+}
