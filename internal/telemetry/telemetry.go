@@ -351,15 +351,19 @@ func SetBaggageAttributes(ctx context.Context, span trace.Span) {
 var defaultPipeline atomic.Pointer[Telemetry]
 
 // InstallDefault registers the process-wide pipeline; cmd binaries call it
-// immediately after Setup.
+// immediately after Setup. The globals are installed through the nil-safe
+// TracerProvider/MeterProvider accessors: a pipeline without SDK providers
+// (e.g. one built by NewPipelineForTest) must never push a nil delegate into
+// the OTel global state — doing so panics in global.(*meter).setDelegate the
+// moment a placeholder meter exists (PRA-138).
 func InstallDefault(telemetry *Telemetry) {
 	if telemetry == nil {
 		return
 	}
 	defaultPipeline.Store(telemetry)
 	if telemetry.Enabled() {
-		otel.SetTracerProvider(telemetry.tracerProvider)
-		otel.SetMeterProvider(telemetry.meterProvider)
+		otel.SetTracerProvider(telemetry.TracerProvider())
+		otel.SetMeterProvider(telemetry.MeterProvider())
 	}
 	otel.SetTextMapPropagator(telemetry.propagator)
 }

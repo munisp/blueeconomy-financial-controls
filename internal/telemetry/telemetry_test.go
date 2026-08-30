@@ -11,6 +11,7 @@ import (
 
 	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
@@ -291,4 +292,48 @@ func TestLoadConfigContract(t *testing.T) {
 	t.Setenv("OTEL_SDK_DISABLED", "true")
 	_, err = LoadConfig("contract-test")
 	require.Error(t, err, "OTEL_SDK_DISABLED=true conflicting with an endpoint fails closed")
+}
+
+// TestInstallDefaultNeverInstallsNilGlobals is the PRA-138 regression pin:
+// NewPipelineForTest pipelines carry no SDK meter provider; InstallDefault
+// must fall back to the explicit noop providers instead of pushing a nil
+// delegate into the OTel global state. Before the fix this panicked in
+// global.(*meter).setDelegate whenever a placeholder meter already existed
+// (e.g. created by otelpgx during DB-gated store tests).
+func TestInstallDefaultNeverInstallsNilGlobals(t *testing.T) {
+	// Force placeholder instruments to exist against the global placeholder
+	// provider BEFORE any real provider is installed — the exact ordering
+	// that made the mojaloop package panic in one invocation.
+	placeholder := otel.Meter("pra-138-placeholder")
+	_, err := placeholder.Int64Counter("pra_138_placeholder_total")
+	require.NoError(t, err)
+
+	priorDefault := Default()
+	priorTracerProvider := otel.GetTracerProvider()
+	priorMeterProvider := otel.GetMeterProvider()
+	priorPropagator := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		InstallDefault(priorDefault)
+		otel.SetTracerProvider(priorTracerProvider)
+		otel.SetMeterProvider(priorMeterProvider)
+		otel.SetTextMapPropagator(priorPropagator)
+	})
+
+	pipeline, err := NewPipelineForTest(sdktrace.NewTracerProvider(), "pra-138-test")
+	require.NoError(t, err)
+	require.NotPanics(t, func() { InstallDefault(pipeline) },
+		"InstallDefault must never push a nil meter delegate into the OTel global state")
+
+	// The installed globals must be usable (noop) providers, not nil delegates.
+	meter := otel.GetMeterProvider().Meter("pra-138-after-install")
+	counter, err := meter.Int64Counter("pra_138_after_install_total")
+	require.NoError(t, err)
+	require.NotPanics(t, func() { counter.Add(context.Background(), 1) })
+
+	tracer := otel.GetTracerProvider().Tracer("pra-138-after-install")
+	_, span := tracer.Start(context.Background(), "pra-138")
+	require.NotPanics(t, func() { span.End() })
+
+	// InstallDefault(nil) remains a no-op (callers use it defensively).
+	require.NotPanics(t, func() { InstallDefault(nil) })
 }
