@@ -126,6 +126,12 @@ func (store *Store) RunRecon(ctx context.Context, triggerKind, actor string, asO
 	}
 	// Matched notes move to SETTLED under the recon system actor.
 	for noteID, settlementID := range plan.SettledNotes {
+		var priorState string
+		probe := tx.QueryRow(ctx,
+			`SELECT state FROM revenue_debit_notes WHERE debit_note_id = $1 FOR UPDATE`, noteID).Scan(&priorState)
+		if probe != nil {
+			continue
+		}
 		result, err := tx.Exec(ctx,
 			`UPDATE revenue_debit_notes SET state = 'SETTLED', updated_at = now()
 			 WHERE debit_note_id = $1 AND state IN ('ISSUED', 'ACKED', 'DISPUTED')`, noteID)
@@ -135,7 +141,7 @@ func (store *Store) RunRecon(ctx context.Context, triggerKind, actor string, asO
 		if result.RowsAffected() == 0 {
 			continue
 		}
-		if err := insertTransition(ctx, tx, noteID, "OPEN", StateSettled,
+		if err := insertTransition(ctx, tx, noteID, priorState, StateSettled,
 			"three-way match with settlement "+settlementID, reconEngineActor, ""); err != nil {
 			return RunSummary{}, err
 		}
