@@ -90,7 +90,7 @@ func TestPlanReconAllExceptionClasses(t *testing.T) {
 	if counts[ExceptionUnmatchedAssessment] != 1 {
 		t.Fatalf("unmatched assessment count: %+v", counts)
 	}
-	if counts[ExceptionDuplicateBankRef] != 1 {
+	if counts[ExceptionDuplicateBankRef] != 2 {
 		t.Fatalf("duplicate bank ref count: %+v", counts)
 	}
 	if len(plan.Matches) != 0 {

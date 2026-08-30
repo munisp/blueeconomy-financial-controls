@@ -391,7 +391,7 @@ func (store *Store) GetDebitNote(ctx context.Context, debitNoteID string) (Debit
 	var documentNumber, cancelReason, checker *string
 	err := store.pool.QueryRow(ctx,
 		`SELECT debit_note_id, assessment_id, agency, entity_ref, document_number,
-		        amount_usd_minor, amount_ngn_minor, effective_date, due_date, state,
+		        amount_usd_minor, amount_ngn_minor, effective_date::text, due_date::text, state,
 		        cancel_reason, maker, checker, correlation_id, created_at, updated_at
 		 FROM revenue_debit_notes WHERE debit_note_id = $1`, debitNoteID).
 		Scan(&note.DebitNoteID, &note.AssessmentID, &note.Agency, &note.EntityRef, &documentNumber,

@@ -132,7 +132,7 @@ func (store *Store) GetSettlement(ctx context.Context, settlementID string) (Set
 	var noteID, tbID *string
 	err := store.pool.QueryRow(ctx,
 		`SELECT settlement_id, debit_note_id, bank_reference, tb_transfer_id, amount_minor,
-		        currency, payer_ref, value_date, recorded_by, created_at
+		        currency, payer_ref, value_date::text, recorded_by, created_at
 		 FROM settlement_records WHERE settlement_id = $1`, settlementID).
 		Scan(&settlement.SettlementID, &noteID, &settlement.BankReference, &tbID,
 			&settlement.AmountMinor, &settlement.Currency, &settlement.PayerRef,

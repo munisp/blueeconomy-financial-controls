@@ -178,7 +178,7 @@ func (store *Store) loadReconInput(ctx context.Context, asOf time.Time) (reconIn
 	input := reconInput{AsOf: asOf}
 	noteRows, err := store.pool.Query(ctx,
 		`SELECT n.debit_note_id, n.assessment_id, n.agency, n.entity_ref, n.document_number,
-		        n.amount_usd_minor, n.amount_ngn_minor, n.effective_date, n.due_date, n.state,
+		        n.amount_usd_minor, n.amount_ngn_minor, n.effective_date::text, n.due_date::text, n.state,
 		        n.maker, n.correlation_id
 		 FROM revenue_debit_notes n
 		 WHERE n.state IN ('ISSUED', 'ACKED', 'DISPUTED')
@@ -206,7 +206,7 @@ func (store *Store) loadReconInput(ctx context.Context, asOf time.Time) (reconIn
 
 	settlementRows, err := store.pool.Query(ctx,
 		`SELECT s.settlement_id, s.debit_note_id, s.bank_reference, s.amount_minor, s.currency,
-		        s.payer_ref, s.value_date, s.recorded_by
+		        s.payer_ref, s.value_date::text, s.recorded_by
 		 FROM settlement_records s
 		 WHERE NOT EXISTS (SELECT 1 FROM recon_matches m WHERE m.settlement_id = s.settlement_id)
 		 ORDER BY s.created_at, s.settlement_id`)
@@ -232,7 +232,7 @@ func (store *Store) loadReconInput(ctx context.Context, asOf time.Time) (reconIn
 	}
 
 	lineRows, err := store.pool.Query(ctx,
-		`SELECT l.statement_id, l.line_no, l.bank_reference, l.value_date, l.amount_minor, l.currency
+		`SELECT l.statement_id, l.line_no, l.bank_reference, l.value_date::text, l.amount_minor, l.currency
 		 FROM bank_statement_lines l
 		 WHERE l.direction = 'CREDIT'
 		   AND NOT EXISTS (SELECT 1 FROM recon_matches m

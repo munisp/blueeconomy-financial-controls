@@ -372,7 +372,7 @@ func (store *Store) getAdvice(ctx context.Context, adviceID string) (RemittanceA
 	var advice RemittanceAdvice
 	var allocationsRaw, bundle []byte
 	err := store.pool.QueryRow(ctx,
-		`SELECT advice_id, settlement_id, revenue_line, agency, as_of, amount_minor, currency,
+		`SELECT advice_id, settlement_id, revenue_line, agency, as_of::text, amount_minor, currency,
 		        allocations, envelope, created_by, created_at
 		 FROM tsa_remittance_advices WHERE advice_id = $1`, adviceID).
 		Scan(&advice.AdviceID, &advice.SettlementID, &advice.RevenueLine, &advice.Agency,

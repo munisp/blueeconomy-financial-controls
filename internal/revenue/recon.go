@@ -103,12 +103,17 @@ func planRecon(input reconInput) reconPlan {
 	}
 
 	for _, settlement := range input.Settlements {
-		if siblings := settlementsByRef[settlement.BankReference]; len(siblings) > 1 && siblings[0].SettlementID != settlement.SettlementID {
+		if siblings := settlementsByRef[settlement.BankReference]; len(siblings) > 1 {
+			// Fail closed on a shared bank reference: EVERY sibling is
+			// frozen as a duplicate-suspect and none is matched — one of
+			// them may be fraudulent, and matching either silently would
+			// settle a note on possibly-duplicated money.
 			plan.Exceptions = append(plan.Exceptions, exceptionDecision{
 				Class:        ExceptionDuplicateBankRef,
 				DedupeKey:    ExceptionDuplicateBankRef + "|settlement:" + settlement.SettlementID,
 				SettlementID: settlement.SettlementID,
 				Currency:     settlement.Currency,
+				ActualMinor:  int64Ptr(settlement.AmountMinor),
 				Detail: fmt.Sprintf("bank reference %q is shared with settlement %s",
 					settlement.BankReference, siblings[0].SettlementID),
 			})
