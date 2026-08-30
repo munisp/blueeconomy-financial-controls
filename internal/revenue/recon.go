@@ -138,14 +138,14 @@ func planRecon(input reconInput) reconPlan {
 		expected := noteAmountIn(note, settlement.Currency)
 		if expected != settlement.AmountMinor {
 			plan.Exceptions = append(plan.Exceptions, exceptionDecision{
-				Class:        ExceptionAmountMismatch,
-				DedupeKey:    ExceptionAmountMismatch + "|settlement:" + settlement.SettlementID,
-				DebitNoteID:  note.DebitNoteID,
-				SettlementID: settlement.SettlementID,
+				Class:         ExceptionAmountMismatch,
+				DedupeKey:     ExceptionAmountMismatch + "|settlement:" + settlement.SettlementID,
+				DebitNoteID:   note.DebitNoteID,
+				SettlementID:  settlement.SettlementID,
 				ExpectedMinor: int64Ptr(expected),
 				ActualMinor:   int64Ptr(settlement.AmountMinor),
-				Currency:     settlement.Currency,
-				Detail:       "settlement amount differs from the debit-note amount",
+				Currency:      settlement.Currency,
+				Detail:        "settlement amount differs from the debit-note amount",
 			})
 			continue
 		}
@@ -157,16 +157,16 @@ func planRecon(input reconInput) reconPlan {
 		}
 		if line.AmountMinor != settlement.AmountMinor || line.Currency != settlement.Currency {
 			plan.Exceptions = append(plan.Exceptions, exceptionDecision{
-				Class:            ExceptionAmountMismatch,
-				DedupeKey:        ExceptionAmountMismatch + "|line:" + line.StatementID + ":" + fmt.Sprint(line.LineNo),
-				DebitNoteID:      note.DebitNoteID,
-				SettlementID:     settlement.SettlementID,
-				StatementID:      line.StatementID,
-				StatementLineNo:  line.LineNo,
-				ExpectedMinor:    int64Ptr(settlement.AmountMinor),
-				ActualMinor:      int64Ptr(line.AmountMinor),
-				Currency:         settlement.Currency,
-				Detail:           "statement line amount differs from the settlement amount",
+				Class:           ExceptionAmountMismatch,
+				DedupeKey:       ExceptionAmountMismatch + "|line:" + line.StatementID + ":" + fmt.Sprint(line.LineNo),
+				DebitNoteID:     note.DebitNoteID,
+				SettlementID:    settlement.SettlementID,
+				StatementID:     line.StatementID,
+				StatementLineNo: line.LineNo,
+				ExpectedMinor:   int64Ptr(settlement.AmountMinor),
+				ActualMinor:     int64Ptr(line.AmountMinor),
+				Currency:        settlement.Currency,
+				Detail:          "statement line amount differs from the settlement amount",
 			})
 			continue
 		}
@@ -193,13 +193,13 @@ func planRecon(input reconInput) reconPlan {
 			continue // settlement exists but failed its own matching — its exception carries it
 		}
 		plan.Exceptions = append(plan.Exceptions, exceptionDecision{
-			Class:            ExceptionUnmatchedStatement,
-			DedupeKey:        ExceptionUnmatchedStatement + "|line:" + line.StatementID + ":" + fmt.Sprint(line.LineNo),
-			StatementID:      line.StatementID,
-			StatementLineNo:  line.LineNo,
-			ActualMinor:      int64Ptr(line.AmountMinor),
-			Currency:         line.Currency,
-			Detail:           "statement line has no corresponding settlement record",
+			Class:           ExceptionUnmatchedStatement,
+			DedupeKey:       ExceptionUnmatchedStatement + "|line:" + line.StatementID + ":" + fmt.Sprint(line.LineNo),
+			StatementID:     line.StatementID,
+			StatementLineNo: line.LineNo,
+			ActualMinor:     int64Ptr(line.AmountMinor),
+			Currency:        line.Currency,
+			Detail:          "statement line has no corresponding settlement record",
 		})
 	}
 

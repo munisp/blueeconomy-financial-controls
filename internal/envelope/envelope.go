@@ -292,7 +292,7 @@ func (signer *Signer) Sign(artifactKind, artifactID string, payload any, now tim
 					},
 				},
 				"extension": []any{map[string]any{
-					"url":        jwsExtensionURL,
+					"url":         jwsExtensionURL,
 					"valueString": jws,
 				}},
 			},

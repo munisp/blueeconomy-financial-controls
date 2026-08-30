@@ -26,9 +26,9 @@ import (
 // Dual control is SQL-enforced: issuance and cancellation guarded UPDATEs
 // require the actor to differ from the note's maker.
 type Store struct {
-	pool    *pgxpool.Pool
-	signer  *envelope.Signer
-	now     func() time.Time
+	pool   *pgxpool.Pool
+	signer *envelope.Signer
+	now    func() time.Time
 }
 
 // NewStore fails closed on a nil pool or signer (the signer seals debit
@@ -104,8 +104,8 @@ func (store *Store) CreateDebitNote(ctx context.Context, request IssueRequest, i
 
 	// Load the assessment and its CHARGED lines (immutable source).
 	var (
-		entityRef           string
-		totalUSD, totalNGN  int64
+		entityRef          string
+		totalUSD, totalNGN int64
 	)
 	err = store.pool.QueryRow(ctx,
 		`SELECT request->>'entityRef', total_usd_minor, total_ngn_minor

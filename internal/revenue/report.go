@@ -13,15 +13,15 @@ import (
 
 // AgencyRevenue is one agency's billed/settled position over a window.
 type AgencyRevenue struct {
-	Agency            string `json:"agency"`
-	NotesIssued       int    `json:"notesIssued"`
-	BilledUSDMinor    int64  `json:"billedUsdMinor"`
-	BilledNGNMinor    int64  `json:"billedNgnMinor"`
-	SettledNotes      int    `json:"settledNotes"`
-	SettledUSDMinor   int64  `json:"settledUsdMinor"`
-	SettledNGNMinor   int64  `json:"settledNgnMinor"`
-	OutstandingUSD    int64  `json:"outstandingUsdMinor"`
-	OutstandingNGN    int64  `json:"outstandingNgnMinor"`
+	Agency          string `json:"agency"`
+	NotesIssued     int    `json:"notesIssued"`
+	BilledUSDMinor  int64  `json:"billedUsdMinor"`
+	BilledNGNMinor  int64  `json:"billedNgnMinor"`
+	SettledNotes    int    `json:"settledNotes"`
+	SettledUSDMinor int64  `json:"settledUsdMinor"`
+	SettledNGNMinor int64  `json:"settledNgnMinor"`
+	OutstandingUSD  int64  `json:"outstandingUsdMinor"`
+	OutstandingNGN  int64  `json:"outstandingNgnMinor"`
 }
 
 // RevenueByAgency aggregates issued debit notes per agency over

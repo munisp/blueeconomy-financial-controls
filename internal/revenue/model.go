@@ -303,22 +303,22 @@ type Match struct {
 
 // Exception is one reconciliation exception-queue entry.
 type Exception struct {
-	ExceptionID       string     `json:"exceptionId"`
-	RunID             string     `json:"runId"`
-	Class             string     `json:"class"`
-	State             string     `json:"state"`
-	DebitNoteID       string     `json:"debitNoteId,omitempty"`
-	SettlementID      string     `json:"settlementId,omitempty"`
-	StatementID       string     `json:"statementId,omitempty"`
-	StatementLineNo   int        `json:"statementLineNo,omitempty"`
-	ExpectedMinor     *int64     `json:"expectedAmountMinor,omitempty"`
-	ActualMinor       *int64     `json:"actualAmountMinor,omitempty"`
-	Currency          string     `json:"currency,omitempty"`
-	Detail            string     `json:"detail"`
-	Resolver          string     `json:"resolver,omitempty"`
-	ResolutionNote    string     `json:"resolutionNote,omitempty"`
-	ResolvedAt        *time.Time `json:"resolvedAt,omitempty"`
-	CreatedAt         time.Time  `json:"createdAt"`
+	ExceptionID     string     `json:"exceptionId"`
+	RunID           string     `json:"runId"`
+	Class           string     `json:"class"`
+	State           string     `json:"state"`
+	DebitNoteID     string     `json:"debitNoteId,omitempty"`
+	SettlementID    string     `json:"settlementId,omitempty"`
+	StatementID     string     `json:"statementId,omitempty"`
+	StatementLineNo int        `json:"statementLineNo,omitempty"`
+	ExpectedMinor   *int64     `json:"expectedAmountMinor,omitempty"`
+	ActualMinor     *int64     `json:"actualAmountMinor,omitempty"`
+	Currency        string     `json:"currency,omitempty"`
+	Detail          string     `json:"detail"`
+	Resolver        string     `json:"resolver,omitempty"`
+	ResolutionNote  string     `json:"resolutionNote,omitempty"`
+	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
 }
 
 // RunSummary reports one completed recon batch.
