@@ -66,8 +66,14 @@ func TestRealTigerBeetleMirror(t *testing.T) {
 		Code:            7,
 	}}); err != nil {
 		t.Fatalf("create transfer: %v", err)
-	} else if len(results) != 0 {
-		t.Fatalf("transfer results: %+v", results)
+	} else {
+		// tigerbeetle-go v0.17.9 returns a per-transfer result INCLUDING
+		// successes (bindings.go CreateTransferResult, upstream
+		// tb_client_test.go): exactly one, and it must be TransferCreated.
+		// Any other status is a real failure.
+		if len(results) != 1 || results[0].Status != tigerbeetle.TransferCreated {
+			t.Fatalf("transfer results: %+v", results)
+		}
 	}
 
 	syncer, err := NewSyncer(client, store, testConfig())
