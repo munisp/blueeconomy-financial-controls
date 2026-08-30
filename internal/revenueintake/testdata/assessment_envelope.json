@@ -1,0 +1,57 @@
+{
+  "envelopeVersion": "1.0",
+  "eventId": "3022e542-9513-4095-924d-69f4176069cb",
+  "eventType": "revenue.assessment_issued",
+  "occurredAt": "2026-08-16T09:30:05Z",
+  "producer": "s1-port-interoperability",
+  "correlationId": "sbm-2026-0007-assessment",
+  "classification": "INTERNAL",
+  "fhir": {
+    "resourceType": "Bundle",
+    "type": "message",
+    "timestamp": "2026-08-16T09:30:05Z",
+    "entry": [
+      {
+        "fullUrl": "urn:uuid:c0e2dabf-e419-48f8-a4b1-b92595c90bfa",
+        "resource": {
+          "resourceType": "Basic",
+          "id": "SBM-2026-0007",
+          "code": {
+            "text": "revenue.assessment_issued"
+          },
+          "extension": [
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain-payload",
+              "valueString": "{\"as_of\":\"2026-08-15T00:00:00Z\",\"assessed_at\":\"2026-08-16T09:30:00Z\",\"assessed_by\":\"tariff-engine\",\"assessment_id\":\"a1b2c3d4-0000-4000-8000-0000000000aa\",\"call_reference\":\"SBM-2026-0007\",\"currency\":\"USD\",\"domain\":\"OFFSHORE_TERMINAL\",\"facts\":{\"gross_tonnage\":\"125000\",\"operation\":\"SBM_EXPORT\"},\"idempotency_key\":\"sbm-2026-0007-assessment\",\"line_items\":[{\"amount_minor\":\"2500000\",\"code\":\"TERMINAL_FEE\",\"currency\":\"USD\"}],\"schedule_id\":\"sched-offshore-2026Q3\",\"total_minor\":2500000}"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/call-reference",
+              "valueString": "SBM-2026-0007"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/currency",
+              "valueString": "USD"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/domain",
+              "valueString": "OFFSHORE_TERMINAL"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/schedule-id",
+              "valueString": "sched-offshore-2026Q3"
+            },
+            {
+              "url": "https://blueeconomy.gov.ng/fhir/StructureDefinition/total-minor",
+              "valueString": "2500000"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "provenance": {
+    "principalId": "tariff-engine",
+    "principalRole": "service",
+    "signature": "eyJhbGciOiJFZERTQSIsImtpZCI6InBvcnQtaW50ZXJvcGVyYWJpbGl0eS0xIn0.eyJjbGFzc2lmaWNhdGlvbiI6IklOVEVSTkFMIiwiY29ycmVsYXRpb25JZCI6InNibS0yMDI2LTAwMDctYXNzZXNzbWVudCIsImVudmVsb3BlVmVyc2lvbiI6IjEuMCIsImV2ZW50SWQiOiIzMDIyZTU0Mi05NTEzLTQwOTUtOTI0ZC02OWY0MTc2MDY5Y2IiLCJldmVudFR5cGUiOiJyZXZlbnVlLmFzc2Vzc21lbnRfaXNzdWVkIiwiZmhpciI6eyJlbnRyeSI6W3siZnVsbFVybCI6InVybjp1dWlkOmMwZTJkYWJmLWU0MTktNDhmOC1hNGIxLWI5MjU5NWM5MGJmYSIsInJlc291cmNlIjp7ImNvZGUiOnsidGV4dCI6InJldmVudWUuYXNzZXNzbWVudF9pc3N1ZWQifSwiZXh0ZW5zaW9uIjpbeyJ1cmwiOiJodHRwczovL2JsdWVlY29ub215Lmdvdi5uZy9maGlyL1N0cnVjdHVyZURlZmluaXRpb24vZG9tYWluLXBheWxvYWQiLCJ2YWx1ZVN0cmluZyI6IntcImFzX29mXCI6XCIyMDI2LTA4LTE1VDAwOjAwOjAwWlwiLFwiYXNzZXNzZWRfYXRcIjpcIjIwMjYtMDgtMTZUMDk6MzA6MDBaXCIsXCJhc3Nlc3NlZF9ieVwiOlwidGFyaWZmLWVuZ2luZVwiLFwiYXNzZXNzbWVudF9pZFwiOlwiYTFiMmMzZDQtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMGFhXCIsXCJjYWxsX3JlZmVyZW5jZVwiOlwiU0JNLTIwMjYtMDAwN1wiLFwiY3VycmVuY3lcIjpcIlVTRFwiLFwiZG9tYWluXCI6XCJPRkZTSE9SRV9URVJNSU5BTFwiLFwiZmFjdHNcIjp7XCJncm9zc190b25uYWdlXCI6XCIxMjUwMDBcIixcIm9wZXJhdGlvblwiOlwiU0JNX0VYUE9SVFwifSxcImlkZW1wb3RlbmN5X2tleVwiOlwic2JtLTIwMjYtMDAwNy1hc3Nlc3NtZW50XCIsXCJsaW5lX2l0ZW1zXCI6W3tcImFtb3VudF9taW5vclwiOlwiMjUwMDAwMFwiLFwiY29kZVwiOlwiVEVSTUlOQUxfRkVFXCIsXCJjdXJyZW5jeVwiOlwiVVNEXCJ9XSxcInNjaGVkdWxlX2lkXCI6XCJzY2hlZC1vZmZzaG9yZS0yMDI2UTNcIixcInRvdGFsX21pbm9yXCI6MjUwMDAwMH0ifSx7InVybCI6Imh0dHBzOi8vYmx1ZWVjb25vbXkuZ292Lm5nL2ZoaXIvU3RydWN0dXJlRGVmaW5pdGlvbi9jYWxsLXJlZmVyZW5jZSIsInZhbHVlU3RyaW5nIjoiU0JNLTIwMjYtMDAwNyJ9LHsidXJsIjoiaHR0cHM6Ly9ibHVlZWNvbm9teS5nb3YubmcvZmhpci9TdHJ1Y3R1cmVEZWZpbml0aW9uL2N1cnJlbmN5IiwidmFsdWVTdHJpbmciOiJVU0QifSx7InVybCI6Imh0dHBzOi8vYmx1ZWVjb25vbXkuZ292Lm5nL2ZoaXIvU3RydWN0dXJlRGVmaW5pdGlvbi9kb21haW4iLCJ2YWx1ZVN0cmluZyI6Ik9GRlNIT1JFX1RFUk1JTkFMIn0seyJ1cmwiOiJodHRwczovL2JsdWVlY29ub215Lmdvdi5uZy9maGlyL1N0cnVjdHVyZURlZmluaXRpb24vc2NoZWR1bGUtaWQiLCJ2YWx1ZVN0cmluZyI6InNjaGVkLW9mZnNob3JlLTIwMjZRMyJ9LHsidXJsIjoiaHR0cHM6Ly9ibHVlZWNvbm9teS5nb3YubmcvZmhpci9TdHJ1Y3R1cmVEZWZpbml0aW9uL3RvdGFsLW1pbm9yIiwidmFsdWVTdHJpbmciOiIyNTAwMDAwIn1dLCJpZCI6IlNCTS0yMDI2LTAwMDciLCJyZXNvdXJjZVR5cGUiOiJCYXNpYyJ9fV0sInJlc291cmNlVHlwZSI6IkJ1bmRsZSIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMTZUMDk6MzA6MDVaIiwidHlwZSI6Im1lc3NhZ2UifSwib2NjdXJyZWRBdCI6IjIwMjYtMDgtMTZUMDk6MzA6MDVaIiwicHJvZHVjZXIiOiJzMS1wb3J0LWludGVyb3BlcmFiaWxpdHkiLCJwcm92ZW5hbmNlIjp7InByaW5jaXBhbElkIjoidGFyaWZmLWVuZ2luZSIsInByaW5jaXBhbFJvbGUiOiJzZXJ2aWNlIn19.u6EvTVQc_yEkAmdr2pCcmLLMwIF3uymHWB20w6VegjmtrxGHA75Bz2UvV0wl9sRT6qQuqJOggHeIhPK225-GBA"
+  }
+}

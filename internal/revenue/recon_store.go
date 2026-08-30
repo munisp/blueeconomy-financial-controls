@@ -146,6 +146,18 @@ func (store *Store) RunRecon(ctx context.Context, triggerKind, actor string, asO
 			return RunSummary{}, err
 		}
 	}
+	// Intake assessments observed by a settlement move to SETTLEMENT_OBSERVED
+	// with the settlement link (one guarded update; a concurrent rerun that
+	// already linked is skipped).
+	for _, intakeMatch := range plan.IntakeMatches {
+		if _, err := tx.Exec(ctx,
+			`UPDATE revenue_intake_assessments
+			 SET state = 'SETTLEMENT_OBSERVED', settlement_id = $2
+			 WHERE event_id = $1 AND state = 'OPEN'`,
+			intakeMatch.EventID, intakeMatch.SettlementID); err != nil {
+			return RunSummary{}, fmt.Errorf("link intake assessment settlement: %w", err)
+		}
+	}
 	for _, decision := range plan.Exceptions {
 		if err := store.insertException(ctx, tx, runID, decision); err != nil {
 			return RunSummary{}, err
@@ -209,6 +221,8 @@ func (store *Store) loadReconInput(ctx context.Context, asOf time.Time) (reconIn
 		        s.payer_ref, s.value_date::text, s.recorded_by
 		 FROM settlement_records s
 		 WHERE NOT EXISTS (SELECT 1 FROM recon_matches m WHERE m.settlement_id = s.settlement_id)
+		   AND NOT EXISTS (SELECT 1 FROM revenue_intake_assessments i
+		                   WHERE i.settlement_id = s.settlement_id)
 		 ORDER BY s.created_at, s.settlement_id`)
 	if err != nil {
 		return input, fmt.Errorf("load unmatched settlements: %w", err)
@@ -250,7 +264,32 @@ func (store *Store) loadReconInput(ctx context.Context, asOf time.Time) (reconIn
 		}
 		input.Lines = append(input.Lines, line)
 	}
-	return input, lineRows.Err()
+	if err := lineRows.Err(); err != nil {
+		return input, err
+	}
+
+	// Open revenue-intake assessments (verified port-interoperability
+	// events) form the assessment-side leg for external fee/dues
+	// assessments.
+	intakeRows, err := store.pool.Query(ctx,
+		`SELECT event_id::text, call_reference, assessment_id,
+		        COALESCE(total_minor, 0), currency, mapping_error
+		 FROM revenue_intake_assessments
+		 WHERE state = 'OPEN'
+		 ORDER BY received_at, event_id`)
+	if err != nil {
+		return input, fmt.Errorf("load open intake assessments: %w", err)
+	}
+	defer intakeRows.Close()
+	for intakeRows.Next() {
+		var intake IntakeAssessment
+		if err := intakeRows.Scan(&intake.EventID, &intake.CallReference, &intake.AssessmentID,
+			&intake.TotalMinor, &intake.Currency, &intake.MappingError); err != nil {
+			return input, fmt.Errorf("scan intake assessment: %w", err)
+		}
+		input.Intake = append(input.Intake, intake)
+	}
+	return input, intakeRows.Err()
 }
 
 // GetRun loads one run summary.

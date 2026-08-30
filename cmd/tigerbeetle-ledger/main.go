@@ -1,10 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"context"
 	"os"
 	"strconv"
 	"strings"

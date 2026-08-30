@@ -78,6 +78,18 @@ var envelopeEventTypes = map[string]string{
 	"cvff.reconciliation_required":   "cvff.disbursement.v1",
 	"cvff.roles_assigned":            "cvff.disbursement.v1",
 	"cvff.reconciliation_resolved":   "cvff.disbursement.v1",
+	// Revenue-assurance chain (W-FEAT-7 / W-CLOSE-FC): every revenue_outbox
+	// event publishes onto the finance revenue contract topic.
+	"revenue.debit_note.created":       "finance.revenue.v1",
+	"revenue.debit_note.transitioned":  "finance.revenue.v1",
+	"revenue.split_rule.created":       "finance.revenue.v1",
+	"revenue.split_rule.activated":     "finance.revenue.v1",
+	"revenue.remittance_advice.issued": "finance.revenue.v1",
+	"revenue.settlement.recorded":      "finance.revenue.v1",
+	"revenue.statement.ingested":       "finance.revenue.v1",
+	"revenue.recon.run_completed":      "finance.revenue.v1",
+	"revenue.recon.exception_raised":   "finance.revenue.v1",
+	"revenue.recon.exception_resolved": "finance.revenue.v1",
 }
 
 // BuildEnvelope maps one outbox event to the platform envelope. It fails

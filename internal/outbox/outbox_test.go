@@ -230,3 +230,30 @@ func TestKafkaProducerFailsClosed(t *testing.T) {
 		t.Fatal("empty key accepted")
 	}
 }
+
+// TestBuildEnvelopeRevenueMapping pins the revenue_outbox registration:
+// every revenue event type maps onto the finance.revenue.v1 contract topic.
+func TestBuildEnvelopeRevenueMapping(t *testing.T) {
+	for _, eventType := range []string{
+		"revenue.debit_note.created",
+		"revenue.debit_note.transitioned",
+		"revenue.split_rule.created",
+		"revenue.split_rule.activated",
+		"revenue.remittance_advice.issued",
+		"revenue.settlement.recorded",
+		"revenue.statement.ingested",
+		"revenue.recon.run_completed",
+		"revenue.recon.exception_raised",
+		"revenue.recon.exception_resolved",
+	} {
+		event := sampleEvent()
+		event.EventType = eventType
+		envelope, err := BuildEnvelope(event)
+		if err != nil {
+			t.Fatalf("revenue event type %q rejected: %v", eventType, err)
+		}
+		if envelope.EventType != "finance.revenue.v1" {
+			t.Fatalf("revenue event type %q mapped to %q", eventType, envelope.EventType)
+		}
+	}
+}

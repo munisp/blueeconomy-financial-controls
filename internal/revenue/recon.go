@@ -21,11 +21,24 @@ type statementLeg struct {
 	Currency      string
 }
 
+// IntakeAssessment is one open revenue-intake assessment (verified
+// port-interoperability event landed by the intake consumer) — the
+// assessment-side recon leg for external fee/dues assessments.
+type IntakeAssessment struct {
+	EventID       string
+	CallReference string
+	AssessmentID  string
+	TotalMinor    int64
+	Currency      string
+	MappingError  string // non-empty: authentic but unmappable — surfaced, never matched
+}
+
 // reconInput is the unmatched snapshot for one batch.
 type reconInput struct {
-	Notes       []DebitNote    // state ISSUED/ACKED/DISPUTED, no match yet
-	Settlements []Settlement   // no match yet
-	Lines       []statementLeg // CREDIT, no match yet
+	Notes       []DebitNote        // state ISSUED/ACKED/DISPUTED, no match yet
+	Settlements []Settlement       // no match yet
+	Lines       []statementLeg     // CREDIT, no match yet
+	Intake      []IntakeAssessment // OPEN revenue-intake assessments
 	AsOf        time.Time
 }
 
@@ -51,11 +64,20 @@ type exceptionDecision struct {
 	Detail          string
 }
 
+// intakeMatchDecision links one settlement to the intake assessment it
+// settles (no recon_matches row — that table is keyed to debit notes).
+type intakeMatchDecision struct {
+	EventID      string
+	SettlementID string
+}
+
 type reconPlan struct {
 	Matches    []matchDecision
 	Exceptions []exceptionDecision
 	// SettledNotes maps note -> settlement for the SETTLED transition.
 	SettledNotes map[string]string
+	// IntakeMatches maps intake event -> observing settlement.
+	IntakeMatches []intakeMatchDecision
 }
 
 // noteAmountIn returns the note's amount in the given currency.
@@ -102,6 +124,25 @@ func planRecon(input reconInput) reconPlan {
 		settlementsByRef[settlement.BankReference] = append(settlementsByRef[settlement.BankReference], settlement)
 	}
 
+	// Open intake assessments are the assessment-side leg for external
+	// fee/dues assessments: a settlement identifies one by remitting with
+	// the call reference (or the assessment id) as its bank reference.
+	// Unmappable rows never match — they are surfaced below.
+	intakeByRef := map[string]IntakeAssessment{}
+	for _, intake := range input.Intake {
+		if intake.MappingError != "" {
+			continue
+		}
+		if _, exists := intakeByRef[intake.CallReference]; !exists {
+			intakeByRef[intake.CallReference] = intake
+		}
+		if intake.AssessmentID != "" {
+			if _, exists := intakeByRef[intake.AssessmentID]; !exists {
+				intakeByRef[intake.AssessmentID] = intake
+			}
+		}
+	}
+
 	for _, settlement := range input.Settlements {
 		if siblings := settlementsByRef[settlement.BankReference]; len(siblings) > 1 {
 			// Fail closed on a shared bank reference: EVERY sibling is
@@ -125,6 +166,30 @@ func planRecon(input reconInput) reconPlan {
 			note, identified = notesByDoc[settlement.BankReference]
 		}
 		if !identified {
+			// No FC debit note: try the intake assessment leg before
+			// declaring the settlement unmatched.
+			intake, intakeFound := intakeByRef[settlement.BankReference]
+			if intakeFound && settlement.DebitNoteID == "" {
+				if intake.TotalMinor == settlement.AmountMinor && intake.Currency == settlement.Currency {
+					plan.IntakeMatches = append(plan.IntakeMatches, intakeMatchDecision{
+						EventID:      intake.EventID,
+						SettlementID: settlement.SettlementID,
+					})
+					matchedSettlements[settlement.SettlementID] = true
+				} else {
+					plan.Exceptions = append(plan.Exceptions, exceptionDecision{
+						Class:         ExceptionAmountMismatch,
+						DedupeKey:     ExceptionAmountMismatch + "|settlement:" + settlement.SettlementID,
+						SettlementID:  settlement.SettlementID,
+						ExpectedMinor: int64Ptr(intake.TotalMinor),
+						ActualMinor:   int64Ptr(settlement.AmountMinor),
+						Currency:      settlement.Currency,
+						Detail:        "settlement amount differs from the intake assessment total (event " + intake.EventID + ")",
+					})
+					matchedSettlements[settlement.SettlementID] = true
+				}
+				continue
+			}
 			plan.Exceptions = append(plan.Exceptions, exceptionDecision{
 				Class:        ExceptionUnmatchedSettlement,
 				DedupeKey:    ExceptionUnmatchedSettlement + "|settlement:" + settlement.SettlementID,
@@ -229,6 +294,21 @@ func planRecon(input reconInput) reconPlan {
 			ExpectedMinor: int64Ptr(note.AmountUSDMinor),
 			Currency:      "USD",
 			Detail:        "debit note is past due with no settlement record",
+		})
+	}
+
+	// Authentic intake assessments whose payload could not be mapped onto a
+	// deterministic recon leg are surfaced as UNMATCHED_STATEMENT-class
+	// items — landed in the exception queue for resolution rather than
+	// guessed into a money record.
+	for _, intake := range input.Intake {
+		if intake.MappingError == "" {
+			continue
+		}
+		plan.Exceptions = append(plan.Exceptions, exceptionDecision{
+			Class:     ExceptionUnmatchedStatement,
+			DedupeKey: ExceptionUnmatchedStatement + "|intake:" + intake.EventID,
+			Detail:    "intake assessment event " + intake.EventID + " could not be mapped to a recon leg: " + intake.MappingError,
 		})
 	}
 	return plan

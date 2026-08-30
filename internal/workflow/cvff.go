@@ -34,12 +34,12 @@ const (
 
 // Stable activity names: workflow histories reference these across deployments.
 const (
-	ActivityBeginUnderwriting      = "cvff.begin-underwriting"
-	ActivityRecordDecision         = "cvff.record-decision"
-	ActivityRecordEscalation       = "cvff.record-escalation"
-	ActivityDisburse               = "cvff.disburse"
-	ActivityResolveReconciliation  = "cvff.resolve-reconciliation"
-	ActivityCommitAudit            = "cvff.commit-audit"
+	ActivityBeginUnderwriting     = "cvff.begin-underwriting"
+	ActivityRecordDecision        = "cvff.record-decision"
+	ActivityRecordEscalation      = "cvff.record-escalation"
+	ActivityDisburse              = "cvff.disburse"
+	ActivityResolveReconciliation = "cvff.resolve-reconciliation"
+	ActivityCommitAudit           = "cvff.commit-audit"
 )
 
 // DecisionSignal is the payload for every party decision signal. PrincipalID

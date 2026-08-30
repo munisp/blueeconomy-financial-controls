@@ -44,7 +44,12 @@ func openStore(t *testing.T) (*Store, *pgxpool.Pool, *envelope.Signer, *envelope
 	if _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
 		t.Fatalf("reset schema: %v", err)
 	}
-	for _, path := range []string{filepath.Join(filepath.Dir(migrationPath), "0008_tariff.sql"), migrationPath} {
+	for _, path := range []string{
+		filepath.Join(filepath.Dir(migrationPath), "0008_tariff.sql"),
+		migrationPath,
+		// 0010 adds the revenue-intake assessments the recon batch reads.
+		filepath.Join(filepath.Dir(migrationPath), "0010_revenue_intake.sql"),
+	} {
 		statement, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", path, err)

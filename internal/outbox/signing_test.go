@@ -188,13 +188,13 @@ func TestSignerFromEnvFailClosed(t *testing.T) {
 	}
 	// Every gap refuses startup.
 	for name, env := range map[string]map[string]string{
-		"missing key":        {EnvSigningKeyEpoch: "2026-08"},
-		"missing epoch":      {EnvSigningPrivateKey: base64Key},
-		"garbage key":        {EnvSigningPrivateKey: "!!!not-a-key!!!", EnvSigningKeyEpoch: "2026-08"},
-		"short key":          {EnvSigningPrivateKey: base64.StdEncoding.EncodeToString([]byte("short")), EnvSigningKeyEpoch: "2026-08"},
+		"missing key":         {EnvSigningKeyEpoch: "2026-08"},
+		"missing epoch":       {EnvSigningPrivateKey: base64Key},
+		"garbage key":         {EnvSigningPrivateKey: "!!!not-a-key!!!", EnvSigningKeyEpoch: "2026-08"},
+		"short key":           {EnvSigningPrivateKey: base64.StdEncoding.EncodeToString([]byte("short")), EnvSigningKeyEpoch: "2026-08"},
 		"rsa pem not ed25519": {EnvSigningPrivateKey: "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----", EnvSigningKeyEpoch: "2026-08"},
-		"blank epoch":        {EnvSigningPrivateKey: base64Key, EnvSigningKeyEpoch: "  "},
-		"hostile epoch":      {EnvSigningPrivateKey: base64Key, EnvSigningKeyEpoch: `2026" ,"alg":"none`},
+		"blank epoch":         {EnvSigningPrivateKey: base64Key, EnvSigningKeyEpoch: "  "},
+		"hostile epoch":       {EnvSigningPrivateKey: base64Key, EnvSigningKeyEpoch: `2026" ,"alg":"none`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := NewEnvelopeSignerFromEnv(func(key string) string { return env[key] }); !errors.Is(err, ErrSigningKeyInvalid) {

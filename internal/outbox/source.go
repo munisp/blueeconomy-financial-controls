@@ -25,6 +25,8 @@ type outboxTable struct {
 var tables = []outboxTable{
 	{name: "financial_intent_outbox", subjectColumn: "intent_id"},
 	{name: "cvff_outbox", subjectColumn: "application_id"},
+	// W-FEAT-7 revenue-assurance outbox (deferred registration, W-CLOSE-FC).
+	{name: "revenue_outbox", subjectColumn: "subject_id"},
 }
 
 // Unpublished returns up to limit unpublished events across both outboxes,
