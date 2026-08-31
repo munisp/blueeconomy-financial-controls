@@ -62,3 +62,10 @@ COPY --from=build /out/declaration-scorer /declaration-scorer
 COPY config/declaration-scorer-rules.json /etc/declaration-scorer/rules.json
 USER nonroot:nonroot
 ENTRYPOINT ["/declaration-scorer"]
+
+# stamps-intake consumes the tax-stamps excise stamp lifecycle events from
+# the stamps.* topics (JWS-verified, idempotent landing).
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS stamps-intake
+COPY --from=build /out/stamps-intake /stamps-intake
+USER nonroot:nonroot
+ENTRYPOINT ["/stamps-intake"]
