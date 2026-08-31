@@ -65,3 +65,82 @@ func TestReconciliationRequiredTransitions(t *testing.T) {
 		}
 	}
 }
+
+func TestAmbiguousTransitions(t *testing.T) {
+	for _, next := range []State{StateReconciliationRequired, StateVoided} {
+		if !ValidOperationalTransition(StateAmbiguous, next) {
+			t.Fatalf("expected ambiguous -> %s to be allowed (officer resolution)", next)
+		}
+	}
+	for _, next := range []State{StateDraft, StateApproved, StateReservationRequested, StateReserved, StatePosted, StateAmbiguous} {
+		if ValidOperationalTransition(StateAmbiguous, next) {
+			t.Fatalf("expected ambiguous -> %s to be rejected", next)
+		}
+	}
+}
+
+func ambiguousIntent() Intent {
+	return Intent{CreateRequest: validRequest(), State: StateAmbiguous, Version: 3}
+}
+
+func TestResolveAmbiguousOfficerDispositions(t *testing.T) {
+	reconciled, err := ResolveAmbiguous(ambiguousIntent(), 3, "officer-001", ResolutionReconcile)
+	if err != nil || reconciled.State != StateReconciliationRequired {
+		t.Fatalf("reconcile resolution = %v, %s", err, reconciled.State)
+	}
+	voided, err := ResolveAmbiguous(ambiguousIntent(), 3, "officer-001", ResolutionVoid)
+	if err != nil || voided.State != StateVoided {
+		t.Fatalf("void resolution = %v, %s", err, voided.State)
+	}
+}
+
+func TestResolveAmbiguousFailClosed(t *testing.T) {
+	if _, err := ResolveAmbiguous(Intent{CreateRequest: validRequest(), State: StateDraft, Version: 1}, 1, "officer-001", ResolutionVoid); err != ErrInvalidState {
+		t.Fatalf("non-ambiguous resolution error = %v", err)
+	}
+	if _, err := ResolveAmbiguous(ambiguousIntent(), 99, "officer-001", ResolutionVoid); err != ErrConflict {
+		t.Fatalf("stale version error = %v", err)
+	}
+	if _, err := ResolveAmbiguous(ambiguousIntent(), 3, "", ResolutionVoid); err == nil {
+		t.Fatal("empty officer accepted")
+	}
+	if _, err := ResolveAmbiguous(ambiguousIntent(), 3, "officer 001", ResolutionVoid); err == nil {
+		t.Fatal("non-canonical officer accepted")
+	}
+	if _, err := ResolveAmbiguous(ambiguousIntent(), 3, "officer-001", Resolution("FORCE_POST")); err != ErrInvalidResolution {
+		t.Fatalf("unknown resolution error = %v", err)
+	}
+}
+
+func TestDraftVoidTransition(t *testing.T) {
+	if !ValidOperationalTransition(StateDraft, StateVoided) {
+		t.Fatal("expected draft -> voided to be allowed (maker void)")
+	}
+	for _, next := range []State{StateApproved, StateReservationRequested, StateReserved, StatePosted, StateAmbiguous, StateReconciliationRequired} {
+		if ValidOperationalTransition(StateDraft, next) {
+			t.Fatalf("expected draft -> %s to be rejected outside approve", next)
+		}
+	}
+}
+
+func TestVoidDraftOnlyByMaker(t *testing.T) {
+	draft := Intent{CreateRequest: validRequest(), State: StateDraft, Version: 1}
+	voided, err := VoidDraft(draft, 1, draft.Maker)
+	if err != nil || voided.State != StateVoided {
+		t.Fatalf("maker void = %v, %s", err, voided.State)
+	}
+	if _, err := VoidDraft(draft, 1, "checker-001"); err != ErrNotMaker {
+		t.Fatalf("non-maker void error = %v", err)
+	}
+	if _, err := VoidDraft(draft, 1, ""); err != ErrNotMaker {
+		t.Fatalf("empty actor void error = %v", err)
+	}
+	if _, err := VoidDraft(draft, 99, draft.Maker); err != ErrConflict {
+		t.Fatalf("stale version error = %v", err)
+	}
+	approved := draft
+	approved.State = StateApproved
+	if _, err := VoidDraft(approved, 1, draft.Maker); err != ErrInvalidState {
+		t.Fatalf("non-draft void error = %v", err)
+	}
+}

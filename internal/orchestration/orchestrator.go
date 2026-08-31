@@ -63,10 +63,10 @@ func (orchestrator *Orchestrator) ReserveApproved(ctx context.Context, intentID 
 		return orchestrator.reconcile(ctx, requested, fmt.Errorf("credit account ID: %w", err))
 	}
 	transferID := deterministicID("pending", requested.IntentID)
-	if _, found, lookupErr := orchestrator.ledger.LookupTransfer(transferID); lookupErr != nil {
+	if _, found, lookupErr := orchestrator.ledger.LookupTransferTraced(ctx, transferID); lookupErr != nil {
 		return orchestrator.reconcile(ctx, requested, fmt.Errorf("lookup pending transfer: %w", lookupErr))
 	} else if !found {
-		if reserveErr := orchestrator.ledger.Reserve(transferID, debitID, creditID, requested.Amount, orchestrator.pendingTimeout); reserveErr != nil {
+		if reserveErr := orchestrator.ledger.ReserveTraced(ctx, transferID, debitID, creditID, requested.Amount, orchestrator.pendingTimeout); reserveErr != nil {
 			return orchestrator.reconcile(ctx, requested, fmt.Errorf("reserve pending transfer: %w", reserveErr))
 		}
 	}
@@ -125,15 +125,15 @@ func (orchestrator *Orchestrator) PostReserved(ctx context.Context, intentID str
 	pendingID := orchestrator.PendingTransferID(current.IntentID)
 	postID := orchestrator.PostTransferID(current.IntentID)
 	voidID := orchestrator.VoidTransferID(current.IntentID)
-	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransfer(voidID); lookupErr != nil {
+	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransferTraced(ctx, voidID); lookupErr != nil {
 		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup void transfer: %w", lookupErr))
 	} else if voidFound {
 		return orchestrator.reconcile(ctx, current, errors.New("pending transfer is already voided"))
 	}
-	if _, postFound, lookupErr := orchestrator.ledger.LookupTransfer(postID); lookupErr != nil {
+	if _, postFound, lookupErr := orchestrator.ledger.LookupTransferTraced(ctx, postID); lookupErr != nil {
 		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup post transfer: %w", lookupErr))
 	} else if !postFound {
-		if postErr := orchestrator.ledger.Post(postID, pendingID); postErr != nil {
+		if postErr := orchestrator.ledger.PostTraced(ctx, postID, pendingID); postErr != nil {
 			return orchestrator.reconcile(ctx, current, fmt.Errorf("post pending transfer: %w", postErr))
 		}
 	}
@@ -158,12 +158,12 @@ func (orchestrator *Orchestrator) VoidReserved(ctx context.Context, intentID str
 	pendingID := orchestrator.PendingTransferID(current.IntentID)
 	postID := orchestrator.PostTransferID(current.IntentID)
 	voidID := orchestrator.VoidTransferID(current.IntentID)
-	if _, postFound, lookupErr := orchestrator.ledger.LookupTransfer(postID); lookupErr != nil {
+	if _, postFound, lookupErr := orchestrator.ledger.LookupTransferTraced(ctx, postID); lookupErr != nil {
 		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup post transfer: %w", lookupErr))
 	} else if postFound {
 		return orchestrator.reconcile(ctx, current, errors.New("pending transfer is already posted"))
 	}
-	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransfer(voidID); lookupErr != nil {
+	if _, voidFound, lookupErr := orchestrator.ledger.LookupTransferTraced(ctx, voidID); lookupErr != nil {
 		return orchestrator.reconcile(ctx, current, fmt.Errorf("lookup void transfer: %w", lookupErr))
 	} else if !voidFound {
 		if voidErr := orchestrator.ledger.Void(voidID, pendingID); voidErr != nil {

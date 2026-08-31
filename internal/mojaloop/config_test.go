@@ -11,6 +11,7 @@ func validMojaloopEnvironment() map[string]string {
 		"MOJALOOP_CALLBACK_BASE_URL":   "https://fmmbe.example.invalid/callbacks",
 		"MOJALOOP_FSPIOP_SOURCE":       "FMMBE",
 		"MOJALOOP_FSPIOP_DESTINATION":  "SWITCH",
+		"MOJALOOP_MODE":                "receive-only",
 		"MOJALOOP_SIGNING_KEY_FILE":    "/run/secrets/mojaloop-signing-key.pem",
 		"MOJALOOP_SIGNING_KID":         "fmmbe-2026-01",
 		"MOJALOOP_SIGNATURE_ALGORITHM": "RS256",
@@ -76,6 +77,9 @@ func TestLoadConfigBindsCallbackBasePathToTransferProfile(t *testing.T) {
 	if config.CallbackTransferPathPrefix != "/callbacks/transfers/" {
 		t.Fatalf("unexpected callback transfer path prefix %q", config.CallbackTransferPathPrefix)
 	}
+	if config.CallbackQuotePathPrefix != "/callbacks/quotes/" {
+		t.Fatalf("unexpected callback quote path prefix %q", config.CallbackQuotePathPrefix)
+	}
 	for _, callbackURL := range []string{
 		"https://fmmbe.example.invalid/callbacks?environment=sandbox",
 		"https://fmmbe.example.invalid/callbacks#fragment",
@@ -86,5 +90,41 @@ func TestLoadConfigBindsCallbackBasePathToTransferProfile(t *testing.T) {
 		if _, err := LoadConfigFrom(func(name string) string { return invalid[name] }); err == nil {
 			t.Fatalf("callback base URL %q accepted", callbackURL)
 		}
+	}
+}
+
+func TestLoadConfigRequiresExplicitMode(t *testing.T) {
+	environment := validMojaloopEnvironment()
+	delete(environment, "MOJALOOP_MODE")
+	if _, err := LoadConfigFrom(func(name string) string { return environment[name] }); err == nil {
+		t.Fatal("missing MOJALOOP_MODE accepted")
+	}
+	for _, mode := range []string{"", "RECEIVE-ONLY", "receive_only", "enabled", " receive-only"} {
+		invalid := validMojaloopEnvironment()
+		invalid["MOJALOOP_MODE"] = mode
+		if _, err := LoadConfigFrom(func(name string) string { return invalid[name] }); err == nil {
+			t.Fatalf("MOJALOOP_MODE=%q accepted", mode)
+		}
+	}
+	environment = validMojaloopEnvironment()
+	environment["MOJALOOP_MODE"] = "full"
+	config, err := LoadConfigFrom(func(name string) string { return environment[name] })
+	if err != nil {
+		t.Fatalf("full mode rejected at parse: %v", err)
+	}
+	if config.Mode != ModeFull {
+		t.Fatalf("mode = %q", config.Mode)
+	}
+}
+
+func TestLoadConfigDerivesQuotePathPrefixAtRoot(t *testing.T) {
+	environment := validMojaloopEnvironment()
+	environment["MOJALOOP_CALLBACK_BASE_URL"] = "https://fmmbe.example.invalid"
+	config, err := LoadConfigFrom(func(name string) string { return environment[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CallbackTransferPathPrefix != "/transfers/" || config.CallbackQuotePathPrefix != "/quotes/" {
+		t.Fatalf("prefixes = %q %q", config.CallbackTransferPathPrefix, config.CallbackQuotePathPrefix)
 	}
 }
