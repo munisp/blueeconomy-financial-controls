@@ -90,6 +90,16 @@ var envelopeEventTypes = map[string]string{
 	"revenue.recon.run_completed":      "finance.revenue.v1",
 	"revenue.recon.exception_raised":   "finance.revenue.v1",
 	"revenue.recon.exception_resolved": "finance.revenue.v1",
+	// WP-6 trade-finance rail (tradefinance.* topics).
+	"tradefinance.consent.requested":             "tradefinance.consent.v1",
+	"tradefinance.consent.activated":             "tradefinance.consent.v1",
+	"tradefinance.consent.rejected":              "tradefinance.consent.v1",
+	"tradefinance.consent.revocation_requested":  "tradefinance.consent.v1",
+	"tradefinance.consent.revoked":               "tradefinance.consent.v1",
+	"tradefinance.application.submitted":         "tradefinance.application.v1",
+	"tradefinance.application.decision_recorded": "tradefinance.application.v1",
+	"tradefinance.application.disbursed":         "tradefinance.application.v1",
+	"tradefinance.application.settled":           "tradefinance.application.v1",
 }
 
 // BuildEnvelope maps one outbox event to the platform envelope. It fails
