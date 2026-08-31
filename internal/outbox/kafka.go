@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/segmentio/kafka-go"
 
@@ -35,11 +38,31 @@ func NewKafkaProducer(brokers, topic string) (*KafkaProducer, error) {
 	if strings.TrimSpace(topic) == "" {
 		return nil, errors.New("Kafka topic is required")
 	}
-	return &KafkaProducer{writer: &kafka.Writer{
+	writer := &kafka.Writer{
 		Addr:         kafka.TCP(addresses...),
 		Topic:        topic,
 		RequiredAcks: kafka.RequireAll,
-	}, topic: topic}, nil
+	}
+	// Batching is opt-in via the environment; defaults preserve the previous
+	// write-through behavior (BatchSize 1, no linger).
+	//
+	//	KAFKA_BATCH_SIZE        messages per batch      (default: 1 = unchanged)
+	//	KAFKA_BATCH_TIMEOUT_MS  linger before flushing  (default: 0 = unchanged)
+	if raw := os.Getenv("KAFKA_BATCH_SIZE"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return nil, fmt.Errorf("KAFKA_BATCH_SIZE must be a positive integer, got %q", raw)
+		}
+		writer.BatchSize = value
+	}
+	if raw := os.Getenv("KAFKA_BATCH_TIMEOUT_MS"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			return nil, fmt.Errorf("KAFKA_BATCH_TIMEOUT_MS must be a positive integer, got %q", raw)
+		}
+		writer.BatchTimeout = time.Duration(value) * time.Millisecond
+	}
+	return &KafkaProducer{writer: writer, topic: topic}, nil
 }
 
 // Publish writes one keyed message. The key is the outbox event ID, making

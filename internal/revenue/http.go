@@ -5,12 +5,38 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/envelope"
 	"github.com/munisp/blueeconomy-financial-controls/internal/tariff"
 )
+
+const (
+	// defaultListLimit bounds unparameterized list responses; listLimitMax is
+	// the hard ceiling for the `limit` query parameter.
+	defaultListLimit = 500
+	listLimitMax     = 5000
+)
+
+// parseListLimit reads the optional `limit` query parameter, clamping it to
+// [1, listLimitMax] and falling back to defaultListLimit when absent or
+// invalid.
+func parseListLimit(request *http.Request) int {
+	raw := request.URL.Query().Get("limit")
+	if raw == "" {
+		return defaultListLimit
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return defaultListLimit
+	}
+	if value > listLimitMax {
+		return listLimitMax
+	}
+	return value
+}
 
 // Handler exposes the revenue-assurance chain over HTTP. Every endpoint
 // except /healthz requires a verified bearer token (the tariff
@@ -291,7 +317,8 @@ func (handler *Handler) listExceptions(writer http.ResponseWriter, request *http
 		return
 	}
 	openOnly := request.URL.Query().Get("state") != "all"
-	exceptions, err := handler.store.ListExceptions(request.Context(), openOnly)
+	limit := parseListLimit(request)
+	exceptions, err := handler.store.ListExceptionsPage(request.Context(), openOnly, limit)
 	respond(writer, map[string]any{"exceptions": exceptions}, err)
 }
 

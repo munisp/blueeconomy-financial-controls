@@ -315,6 +315,13 @@ func (store *Store) GetRun(ctx context.Context, runID string) (RunSummary, error
 
 // ListExceptions returns the exception queue, optionally only OPEN entries.
 func (store *Store) ListExceptions(ctx context.Context, openOnly bool) ([]Exception, error) {
+	return store.ListExceptionsPage(ctx, openOnly, 0)
+}
+
+// ListExceptionsPage returns the exception queue, optionally only OPEN
+// entries, capped at limit rows (limit <= 0 means no cap). The deterministic
+// created_at/exception_id ordering makes the cap stable across calls.
+func (store *Store) ListExceptionsPage(ctx context.Context, openOnly bool, limit int) ([]Exception, error) {
 	query := `SELECT exception_id, run_id, class, state, debit_note_id, settlement_id, statement_id,
 	          statement_line_no, expected_amount_minor, actual_amount_minor, currency, detail,
 	          resolver, resolution_note, resolved_at, created_at
@@ -323,6 +330,9 @@ func (store *Store) ListExceptions(ctx context.Context, openOnly bool) ([]Except
 		query += ` WHERE state = 'OPEN'`
 	}
 	query += ` ORDER BY created_at, exception_id`
+	if limit > 0 {
+		query += fmt.Sprintf(` LIMIT %d`, limit)
+	}
 	rows, err := store.pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list exceptions: %w", err)
@@ -415,17 +425,52 @@ func (store *Store) ResolveException(ctx context.Context, exceptionID, resolver,
 }
 
 func (store *Store) listExceptionsByID(ctx context.Context, exceptionID string) ([]Exception, error) {
-	all, err := store.ListExceptions(ctx, false)
+	rows, err := store.pool.Query(ctx,
+		`SELECT exception_id, run_id, class, state, debit_note_id, settlement_id, statement_id,
+		        statement_line_no, expected_amount_minor, actual_amount_minor, currency, detail,
+		        resolver, resolution_note, resolved_at, created_at
+		 FROM recon_exceptions WHERE exception_id = $1
+		 ORDER BY created_at, exception_id`, exceptionID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list exceptions by id: %w", err)
 	}
-	var found []Exception
-	for _, exception := range all {
-		if exception.ExceptionID == exceptionID {
-			found = append(found, exception)
+	defer rows.Close()
+	found := []Exception{}
+	for rows.Next() {
+		var exception Exception
+		var noteID, settlementID, statementID, currency, resolver, resolutionNote *string
+		var lineNo *int
+		var detailRaw []byte
+		if err := rows.Scan(&exception.ExceptionID, &exception.RunID, &exception.Class, &exception.State,
+			&noteID, &settlementID, &statementID, &lineNo, &exception.ExpectedMinor, &exception.ActualMinor,
+			&currency, &detailRaw, &resolver, &resolutionNote, &exception.ResolvedAt, &exception.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan exception: %w", err)
 		}
+		if noteID != nil {
+			exception.DebitNoteID = *noteID
+		}
+		if settlementID != nil {
+			exception.SettlementID = *settlementID
+		}
+		if statementID != nil {
+			exception.StatementID = *statementID
+		}
+		if lineNo != nil {
+			exception.StatementLineNo = *lineNo
+		}
+		if currency != nil {
+			exception.Currency = *currency
+		}
+		if resolver != nil {
+			exception.Resolver = *resolver
+		}
+		if resolutionNote != nil {
+			exception.ResolutionNote = *resolutionNote
+		}
+		exception.Detail = string(detailRaw)
+		found = append(found, exception)
 	}
-	return found, nil
+	return found, rows.Err()
 }
 
 // ListMatches returns the completed three-way matches for one run.

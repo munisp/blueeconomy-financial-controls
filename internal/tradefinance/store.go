@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/munisp/blueeconomy-financial-controls/internal/envelope"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
 // Store persists consents, applications and their audit evidence. Every
@@ -37,7 +38,14 @@ func NewStore(pool *pgxpool.Pool, signer *envelope.Signer) (*Store, error) {
 
 // Open connects and pings, failing closed on any gap.
 func Open(ctx context.Context, databaseURL string, signer *envelope.Signer) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres DSN: %w", err)
+	}
+	if err := telemetry.ApplyPoolEnv(config); err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open postgres: %w", err)
 	}
