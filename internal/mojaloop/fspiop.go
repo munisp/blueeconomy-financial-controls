@@ -185,15 +185,31 @@ type TransferCallback struct {
 	CompletedTimestamp string        `json:"completedTimestamp,omitempty"`
 }
 
-func ValidateTransferCallback(previous *TransferCallback, callback TransferCallback) error {
+// validateCallbackIdentity enforces the presence of the transfer identity
+// and amount fields. It is the entry validation for every callback,
+// regardless of whether a durable record already exists.
+func validateCallbackIdentity(callback TransferCallback) error {
 	if callback.TransferID == "" || callback.PayerFSP == "" || callback.PayeeFSP == "" || callback.Amount == "" || callback.Currency == "" {
 		return errors.New("transfer callback identity and amount are required")
+	}
+	return nil
+}
+
+func ValidateTransferCallback(previous *TransferCallback, callback TransferCallback) error {
+	if err := validateCallbackIdentity(callback); err != nil {
+		return err
 	}
 	if previous != nil && (previous.TransferID != callback.TransferID || previous.PayerFSP != callback.PayerFSP || previous.PayeeFSP != callback.PayeeFSP || previous.Amount != callback.Amount || previous.Currency != callback.Currency) {
 		return ErrTransferIdentityChange
 	}
 	if previous == nil {
-		if callback.TransferState != TransferReserved && callback.TransferState != TransferCommitted && callback.TransferState != TransferAborted {
+		// First-seen policy (fail-closed): the durable record of a transfer
+		// always begins at RESERVED, the state in which funds are locked.
+		// A first-seen COMMITTED/ABORTED would mean money settled (or was
+		// abandoned) without this rail ever observing the reservation, so it
+		// is rejected as an invalid transition; the Hub must deliver the
+		// RESERVED callback first (replays are idempotent on the body hash).
+		if callback.TransferState != TransferReserved {
 			return ErrInvalidTransferState
 		}
 		return nil

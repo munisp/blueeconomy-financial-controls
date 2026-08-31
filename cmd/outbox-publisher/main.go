@@ -1,0 +1,133 @@
+// outbox-publisher drains the transactional outboxes (financial intents and
+// CVFF disbursements) to Kafka with the platform FHIR-aligned envelope. It is
+// at-least-once with idempotent keys and fails closed when Kafka or
+// PostgreSQL is unavailable.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/munisp/blueeconomy-financial-controls/internal/outbox"
+	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
+)
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatalf("outbox-publisher: %v", err)
+	}
+}
+
+func run() error {
+	databaseURL := required("DATABASE_URL")
+	brokers := required("KAFKA_BROKERS")
+	topic := required("KAFKA_TOPIC")
+	interval, err := intervalEnv("OUTBOX_POLL_INTERVAL_SECONDS")
+	if err != nil {
+		return err
+	}
+	batch, err := batchEnv("OUTBOX_BATCH_SIZE")
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pipeline, err := setupTelemetry(ctx, "outbox-publisher")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pipeline.Shutdown(context.Background()); err != nil {
+			log.Printf("outbox-publisher: telemetry shutdown failed: %v", err)
+		}
+	}()
+
+	pool, err := pipeline.NewPGXPool(ctx, databaseURL)
+	if err != nil {
+		return fmt.Errorf("open postgres: %w", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("ping postgres: %w", err)
+	}
+	producer, err := outbox.NewKafkaProducer(brokers, topic)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+	signer, err := outbox.NewEnvelopeSignerFromEnv(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("envelope signing: %w", err)
+	}
+	source := outbox.NewPostgresSource(pool)
+
+	log.Printf("outbox-publisher: draining to topic %s every %s (batch %d, signing kid %s)", topic, interval, batch, signer.KeyID())
+	for {
+		published, err := outbox.Drain(ctx, source, producer, signer, batch)
+		if err != nil {
+			return fmt.Errorf("drain outbox: %w (published %d before failure)", err, published)
+		}
+		if published > 0 {
+			log.Printf("outbox-publisher: published %d events", published)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+// setupTelemetry builds the OpenTelemetry pipeline from the environment.
+// An absent OTEL_EXPORTER_OTLP_ENDPOINT means telemetry is disabled and the
+// service boots and serves exactly as before (the one sanctioned fail-open).
+func setupTelemetry(ctx context.Context, serviceName string) (*telemetry.Telemetry, error) {
+	config, err := telemetry.LoadConfig(serviceName)
+	if err != nil {
+		return nil, fmt.Errorf("load telemetry config: %w", err)
+	}
+	pipeline, err := telemetry.Setup(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("setup telemetry: %w", err)
+	}
+	telemetry.InstallDefault(pipeline)
+	if pipeline.Enabled() {
+		log.Printf("%s: telemetry enabled (otlp endpoint %s)", serviceName, config.Endpoint)
+	} else {
+		log.Printf("%s: telemetry disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)", serviceName)
+	}
+	return pipeline, nil
+}
+
+func required(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		log.Fatalf("outbox-publisher: %s is required", name)
+	}
+	return value
+}
+
+func intervalEnv(name string) (time.Duration, error) {
+	seconds, err := strconv.ParseInt(required(name), 10, 64)
+	if err != nil || seconds <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer number of seconds", name)
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
+
+func batchEnv(name string) (int, error) {
+	batch, err := strconv.ParseInt(required(name), 10, 32)
+	if err != nil || batch <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return int(batch), nil
+}

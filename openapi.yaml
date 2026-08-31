@@ -9,14 +9,220 @@ paths:
   /v1/financial-intents:
     post:
       operationId: createFinancialIntent
+      description: Creates one intent in DRAFT state. Requires a Keycloak bearer token holding the intent-maker realm role and the PBAC financial.intents:create grant. The maker is derived from the verified token subject; the body has no maker field and a body-supplied maker is rejected.
+      security: [{bearerAuth: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FinancialIntentCreate'}}}}
-      responses: {'201': {description: Intent created.}, '409': {description: Idempotency conflict.}, '422': {description: Invalid intent.}}
+      responses:
+        '201': {description: Intent created.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-maker realm role or policy grant.}
+        '409': {description: Idempotency conflict.}
+        '422': {description: Invalid intent.}
   /v1/financial-intents/{intent_id}/approve:
     post:
       operationId: approveFinancialIntent
+      description: Approves one DRAFT intent. Requires a Keycloak bearer token holding the intent-checker realm role and the PBAC financial.intents:approve grant. The checker is derived from the verified token subject; the body has no checker field and a body-supplied checker is rejected. Maker != checker is enforced server-side on the verified principals (self-approval is a 409 even for a principal holding both roles).
+      security: [{bearerAuth: []}]
       parameters: [{$ref: '#/components/parameters/IntentID'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
-      responses: {'200': {description: Intent approved.}, '409': {description: Version or maker/checker conflict.}}
+      responses:
+        '200': {description: Intent approved.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-checker realm role or policy grant.}
+        '404': {description: Intent not found.}
+        '409': {description: Version or maker/checker conflict.}
+        '422': {description: Invalid approval.}
+  /v1/financial-intents/{intent_id}/void:
+    post:
+      operationId: voidFinancialIntent
+      description: Voids one DRAFT intent. Requires a Keycloak bearer token holding the intent-maker realm role and the PBAC financial.intents:void grant, and the verified token subject must be the recorded maker (a different maker-role principal is a 403). Only DRAFT intents can be voided here — no reservation exists yet, so no ledger compensation is needed; AMBIGUOUS intents are voided through the officer-resolution route. Emits the financial_intent.voided audit event.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IntentID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/Approval'}}}}
+      responses:
+        '200': {description: Intent voided.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the intent-maker realm role or policy grant, or the caller is not the recorded maker.}
+        '404': {description: Intent not found.}
+        '409': {description: Intent is not DRAFT or stale version.}
+        '422': {description: Invalid void request.}
+  /v1/financial-intents/{intent_id}/resolve:
+    post:
+      operationId: resolveFinancialIntent
+      description: Officer resolution of an AMBIGUOUS intent (parked by the evidence-driven reconciler on contradictory or missing TigerBeetle evidence). Requires a Keycloak bearer token holding the financial-controller realm role and the PBAC financial.intents:resolve grant. The officer identity is the verified token subject, recorded in the financial_intent.officer_resolved audit event. RECONCILE returns the intent to RECONCILIATION_REQUIRED; VOID performs the compensating ledger handling first (any outstanding reservation is voided idempotently; an observed post transfer refuses the void with 409 — the money moved and the officer must reconcile instead).
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IntentID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OfficerResolution'}}}}
+      responses:
+        '200': {description: Intent resolved.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the financial-controller realm role or policy grant.}
+        '404': {description: Intent not found.}
+        '409': {description: Intent is not AMBIGUOUS, stale version, or the disposition conflicts with observed ledger evidence.}
+        '422': {description: Invalid resolution request.}
+  /v1/cvff/applications:
+    get:
+      operationId: listCvffApplications
+      description: Lists the authenticated beneficiary's own applications, newest first. Requires a Keycloak bearer token from the blueeconomy-cvff realm holding the beneficiary role.
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: Own applications.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffApplicationSummary'}}}}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the beneficiary realm role.}
+    post:
+      operationId: createCvffApplication
+      description: Creates one application in SUBMITTED state, emits the cvff.application.submitted outbox event and starts the Temporal CVFFDisbursementWorkflow for the application (idempotent workflow ID; an already-running execution is success). The Idempotency-Key header binds retries; replay with identical content returns the original, divergent content is a 409.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationCreate'}}}}
+      responses:
+        '201':
+          description: Application created (or idempotent replay of the original).
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationDetail'}}}
+        '409': {description: Idempotency key reused with different content.}
+        '422':
+          description: Field-level rejection.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+        '503': {description: Application recorded but the disbursement workflow could not be started; retry with the same Idempotency-Key.}
+  /v1/cvff/applications/{application_id}:
+    get:
+      operationId: getCvffApplication
+      description: Returns one own application. Other owners' identifiers fail closed with 404.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Application detail.
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffApplicationDetail'}}}
+        '404': {description: Not found or owned by another principal.}
+  /v1/cvff/applications/{application_id}/events:
+    get:
+      operationId: listCvffApplicationEvents
+      description: Immutable decision trail for one own application, in recording order.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Recorded decisions.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffApprovalEvent'}}}}
+        '404': {description: Not found or owned by another principal.}
+  /v1/cvff/applications/{application_id}/documents:
+    get:
+      operationId: listCvffApplicationDocuments
+      description: Document metadata for one own application.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      responses:
+        '200':
+          description: Uploaded documents.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffUploadedDocument'}}}}
+        '404': {description: Not found or owned by another principal.}
+    post:
+      operationId: uploadCvffApplicationDocument
+      description: Multipart upload (document_type field + file part). Bytes are malware-scanned and stored content-addressed in the configured object-storage backend; uploads fail closed without scanner and quota configuration.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {$ref: '#/components/parameters/ApplicationID'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [document_type, file]
+              properties:
+                document_type: {type: string, enum: [VESSEL_REGISTRATION, CABOTAGE_LICENSE, BANK_DETAILS]}
+                file: {type: string, format: binary}
+      responses:
+        '200': {description: Idempotent replay of the original upload.}
+        '201':
+          description: Document recorded.
+          content: {application/json: {schema: {$ref: '#/components/schemas/CvffUploadedDocument'}}}
+        '404': {description: Application not found or owned by another principal.}
+        '409': {description: Document quota reached or idempotency key reused with different content.}
+        '413': {description: File exceeds the approved size limit.}
+        '422': {description: Unapproved document type, content type, empty file or infected content.}
+        '503': {description: Malware scanner unavailable; upload refused (fail closed).}
+  /v1/cvff/applications/{application_id}/decisions:
+    post:
+      operationId: recordCvffPartyDecision
+      description: Delivers one four-party decision to the application's deterministic disbursement workflow (workflow ID cvff-disbursement-<application_id>; signal-with-start when no execution is running). The caller must be the principal durably bound to the role the current state awaits; the workflow activity re-enforces the binding against the database. Accepted means the signal was durably delivered, not that the state changed.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffDecision'}}}}
+      responses:
+        '202': {description: Decision delivered to the disbursement workflow.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Policy denial, or the identity is not the assigned party for the current state.}
+        '404': {description: Application not found.}
+        '409': {description: Application is not awaiting a party decision, or roles are not assigned yet.}
+        '422': {description: Decision must be APPROVE or REJECT.}
+        '503': {description: Workflow unreachable; retry the same request.}
+  /v1/cvff/admin/applications/{application_id}/roles:
+    put:
+      operationId: assignCvffPartyRoles
+      description: Binds the six four-party roles on one existing application. Requires the cvff-officer realm role; the policy pack enforces segregation of duties (six distinct parties, officer never a party). The write is idempotent (identical replay succeeds, divergent replay conflicts) and the disbursement workflow is (re-)started on the deterministic workflow ID.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffRoleAssignmentRequest'}}}}
+      responses:
+        '200': {description: Roles assigned (or idempotent replay).}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the cvff-officer realm role, or policy denial (SoD violation).}
+        '404': {description: Application not found.}
+        '409': {description: Divergent assignments already recorded, or application closed.}
+        '422': {description: Incomplete or SoD-violating assignments.}
+        '503': {description: Roles recorded but the workflow could not be started; retry the same request.}
+  /v1/cvff/admin/applications/{application_id}/reconciliation:
+    post:
+      operationId: resolveCvffReconciliation
+      description: Resolves an application parked in RECONCILIATION_REQUIRED. Requires the reconciliation-officer realm role; the officer may not be a chain party on the application. RESUME_DISBURSEMENT returns the application to DISBURSEMENT_PENDING (the parked workflow retries disbursement); REJECT closes it as REJECTED. The state transition is applied by the workflow's resolution activity under the officer's recorded identity.
+      security: [{bearerAuth: []}]
+      parameters: [{$ref: '#/components/parameters/ApplicationID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CvffReconciliationResolution'}}}}
+      responses:
+        '202': {description: Resolution delivered to the parked workflow.}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the reconciliation-officer realm role, or policy denial.}
+        '404': {description: Application not found.}
+        '409': {description: Application is not awaiting reconciliation resolution.}
+        '422': {description: Resolution must be RESUME_DISBURSEMENT or REJECT.}
+        '503': {description: Workflow not parked or unreachable.}
+  /v1/cvff/reports/dual-ledger:
+    get:
+      operationId: getCvffDualLedgerReport
+      description: Auditor-facing NGN/USD dual-ledger disbursement report over the mandatory half-open window [from, to) on the disbursement-leg timestamp. Requires a Keycloak bearer token from the blueeconomy-cvff realm holding the auditor realm role.
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: from, in: query, required: true, schema: {type: string, format: date-time}, description: Window start (RFC 3339, inclusive).}
+        - {name: to, in: query, required: true, schema: {type: string, format: date-time}, description: Window end (RFC 3339, exclusive); the window may span at most 366 days.}
+        - {name: format, in: query, required: false, schema: {type: string, enum: [json, csv], default: json}}
+      responses:
+        '200':
+          description: Dual-ledger report rows in disbursement order.
+          content:
+            application/json: {schema: {type: array, items: {$ref: '#/components/schemas/CvffDualLedgerReport'}}}
+            text/csv: {schema: {type: string}}
+        '401': {description: Missing or unverifiable bearer token.}
+        '403': {description: Token without the auditor realm role.}
+        '422':
+          description: Missing, malformed, inverted or over-wide window, or unapproved format.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
+  /v1/mojaloop/quotes/{quote_id}:
+    put:
+      operationId: receiveMojaloopQuoteCallback
+      description: The rail runs receive-only (MOJALOOP_MODE=receive-only); the outbound quote/transfer leg is not implemented. The callback FSPIOP JWS signature and participant headers are verified exactly like the transfer callback, then a truthful 501 problem document is returned.
+      parameters: [{$ref: '#/components/parameters/QuoteID'}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses:
+        '401': {description: Missing or invalid FSPIOP signature.}
+        '403': {description: Unexpected FSPIOP source or destination.}
+        '501':
+          description: Quote callbacks are not processed in receive-only mode.
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
   /v1/mojaloop/transfers/{transfer_id}:
     put:
       operationId: receiveMojaloopTransferCallback
@@ -25,31 +231,160 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/FSPIOPCallback'}}}}
       responses: {'200': {description: Callback persisted or exact terminal replay.}, '409': {description: Callback conflict/regression.}, '422': {description: Signature/profile validation failed.}}
 components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: JWT}
   parameters:
     IntentID: {name: intent_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
     TransferID: {name: transfer_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    QuoteID: {name: quote_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    ApplicationID: {name: application_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
   schemas:
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        errors:
+          type: object
+          additionalProperties: {type: string}
+          description: Per-field rejections keyed by payload field name.
+    CvffApplicationSummary:
+      type: object
+      required: [application_id, vessel_name, amount, currency, state, state_entered_at, created_at, updated_at]
+      properties:
+        application_id: {type: string}
+        vessel_name: {type: string}
+        amount: {type: integer, description: Minor units (kobo).}
+        currency: {type: string, enum: [NGN]}
+        state: {$ref: '#/components/schemas/CvffState'}
+        state_entered_at: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CvffApplicationDetail:
+      allOf:
+        - $ref: '#/components/schemas/CvffApplicationSummary'
+        - type: object
+          required: [imo_number, official_number, vessel_class, cabotage_route, business_name, business_rc_number, business_address]
+          properties:
+            imo_number: {type: string, pattern: '^[0-9]{7}$'}
+            official_number: {type: string}
+            vessel_class: {type: string, enum: [FISHING_TRAWLER, CARGO_COASTER, TUG, BARGE, PASSENGER_FERRY, SUPPLY_VESSEL, CREW_BOAT, OTHER]}
+            cabotage_route: {type: string, enum: [LAGOS_PORT_HARCOURT, LAGOS_ONNE, LAGOS_WARRI, LAGOS_CALABAR, PORT_HARCOURT_BONNY, WARRI_ESCRAVOS, INLAND_WATERWAYS, OTHER]}
+            business_name: {type: string}
+            business_rc_number: {type: string}
+            business_address: {type: string}
+    CvffApplicationCreate:
+      type: object
+      additionalProperties: false
+      required: [vessel_name, imo_number, official_number, vessel_class, cabotage_route, amount, currency, business_name, business_rc_number, business_address]
+      properties:
+        vessel_name: {type: string, minLength: 2, maxLength: 128}
+        imo_number: {type: string, pattern: '^[0-9]{7}$', description: Seven-digit IMO number; check digit verified.}
+        official_number: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9/-]{1,31}$'}
+        vessel_class: {type: string, enum: [FISHING_TRAWLER, CARGO_COASTER, TUG, BARGE, PASSENGER_FERRY, SUPPLY_VESSEL, CREW_BOAT, OTHER]}
+        cabotage_route: {type: string, enum: [LAGOS_PORT_HARCOURT, LAGOS_ONNE, LAGOS_WARRI, LAGOS_CALABAR, PORT_HARCOURT_BONNY, WARRI_ESCRAVOS, INLAND_WATERWAYS, OTHER]}
+        amount: {type: integer, minimum: 500000000, maximum: 200000000000, description: Requested amount in kobo.}
+        currency: {type: string, enum: [NGN]}
+        business_name: {type: string, minLength: 2, maxLength: 256}
+        business_rc_number: {type: string, pattern: '^RC[0-9]{4,10}$'}
+        business_address: {type: string, minLength: 8, maxLength: 512}
+    CvffState:
+      type: string
+      enum: [SUBMITTED, UNDERWRITING_PRIMARY, UNDERWRITING_SECONDARY, UNDERWRITING_TERTIARY, NIMASA_APPROVAL, BANK_CONFIRMATION, DISBURSEMENT_PENDING, DISBURSED, AUDITED, REJECTED, RECONCILIATION_REQUIRED]
+    CvffDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision: {type: string, enum: [APPROVE, REJECT]}
+    CvffRoleAssignmentRequest:
+      type: object
+      required: [assignments]
+      properties:
+        assignments:
+          type: object
+          required: [UNDERWRITER_PRIMARY, UNDERWRITER_SECONDARY, UNDERWRITER_TERTIARY, NIMASA_APPROVER, RECEIVING_BANK, BENEFICIARY]
+          description: One distinct Keycloak principal ID per chain role; the assigning officer may not appear.
+          properties:
+            UNDERWRITER_PRIMARY: {type: string}
+            UNDERWRITER_SECONDARY: {type: string}
+            UNDERWRITER_TERTIARY: {type: string}
+            NIMASA_APPROVER: {type: string}
+            RECEIVING_BANK: {type: string}
+            BENEFICIARY: {type: string}
+    CvffReconciliationResolution:
+      type: object
+      required: [resolution]
+      properties:
+        resolution: {type: string, enum: [RESUME_DISBURSEMENT, REJECT]}
+    CvffApprovalEvent:
+      type: object
+      required: [approval_id, application_id, role, principal_id, decision, from_state, to_state, created_at]
+      properties:
+        approval_id: {type: string, format: uuid}
+        application_id: {type: string}
+        role: {type: string, enum: [UNDERWRITER_PRIMARY, UNDERWRITER_SECONDARY, UNDERWRITER_TERTIARY, NIMASA_APPROVER, RECEIVING_BANK, BENEFICIARY]}
+        principal_id: {type: string}
+        decision: {type: string, enum: [APPROVE, REJECT]}
+        from_state: {$ref: '#/components/schemas/CvffState'}
+        to_state: {$ref: '#/components/schemas/CvffState'}
+        created_at: {type: string, format: date-time}
+    CvffDualLedgerReport:
+      type: object
+      required: [application_id, beneficiary_id, state, fee_ngn_minor, cost_usd_minor, cost_ngn_equivalent, ngn_per_usd_micro, fee_transfer_id, cost_transfer_id, disbursed_at]
+      properties:
+        application_id: {type: string}
+        beneficiary_id: {type: string}
+        state: {$ref: '#/components/schemas/CvffState'}
+        fee_ngn_minor: {type: integer, description: NGN custodial fee leg in minor units.}
+        cost_usd_minor: {type: integer, description: USD cost leg in minor units.}
+        cost_ngn_equivalent: {type: integer, description: FX-adjusted NGN equivalent of the USD cost leg.}
+        ngn_per_usd_micro: {type: integer, description: CBN reference rate, fixed-point micro scale.}
+        fee_transfer_id: {type: string}
+        cost_transfer_id: {type: string}
+        disbursed_at: {type: string, format: date-time}
+    CvffUploadedDocument:
+      type: object
+      required: [document_id, application_id, document_type, file_name, content_type, size_bytes, uploaded_at]
+      properties:
+        document_id: {type: string, format: uuid}
+        application_id: {type: string}
+        document_type: {type: string, enum: [VESSEL_REGISTRATION, CABOTAGE_LICENSE, BANK_DETAILS]}
+        file_name: {type: string}
+        content_type: {type: string}
+        size_bytes: {type: integer, minimum: 1}
+        uploaded_at: {type: string, format: date-time}
     FinancialIntentCreate:
       type: object
       additionalProperties: false
-      required: [intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency, maker]
+      required: [intent_id, external_ref, debit_account_id, credit_account_id, amount, ledger, code, currency]
+      description: The maker is the verified bearer-token subject, recorded server-side; the body carries no actor identity.
       properties:
         intent_id: {type: string, minLength: 1, maxLength: 256}
         external_ref: {type: string, minLength: 1, maxLength: 256}
         debit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
         credit_account_id: {type: string, pattern: '^[0-9a-f]{32}$'}
-        amount: {type: integer, minimum: 1}
+        amount: {type: integer, minimum: 1, description: Minor units of the ledger currency.}
         ledger: {type: integer, minimum: 1}
         code: {type: integer, minimum: 1}
-        currency: {type: string, pattern: '^[A-Z]{3}$'}
-        maker: {type: string, minLength: 1, maxLength: 256}
+        currency: {type: string, enum: [NGN, USD]}
     Approval:
       type: object
       additionalProperties: false
-      required: [expected_version, checker]
+      required: [expected_version]
+      description: The checker is the verified bearer-token subject, recorded server-side and enforced distinct from the maker; the body carries no actor identity.
       properties:
         expected_version: {type: integer, minimum: 1}
-        checker: {type: string, minLength: 1, maxLength: 256}
+    OfficerResolution:
+      type: object
+      additionalProperties: false
+      required: [expected_version, resolution]
+      description: The officer is the verified bearer-token subject, recorded in the audit event; the body carries no actor identity.
+      properties:
+        expected_version: {type: integer, minimum: 1}
+        resolution: {type: string, enum: [RECONCILE, VOID]}
     FSPIOPCallback:
       type: object
       description: Actual callback body is validated together with HTTP JWS/mTLS profile and durable state transition rules.

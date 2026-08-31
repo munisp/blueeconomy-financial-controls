@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -60,19 +61,22 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+	// One-shot CLI: operations carry client-side TigerBeetle spans (noop when
+	// telemetry is disabled) under a background trace.
+	ctx := context.Background()
 
 	switch *operation {
 	case "account":
-		err = service.CreateAccount(parseID(*idHex), *history)
+		err = service.CreateAccountTraced(ctx, parseID(*idHex), *history)
 	case "reserve":
 		if uint64(*timeout) > uint64(^uint32(0)) {
 			fail(errors.New("--timeout exceeds the TigerBeetle uint32 protocol width"))
 		}
-		err = service.Reserve(parseID(*idHex), parseID(*debitHex), parseID(*creditHex), *amount, uint32(*timeout))
+		err = service.ReserveTraced(ctx, parseID(*idHex), parseID(*debitHex), parseID(*creditHex), *amount, uint32(*timeout))
 	case "post":
-		err = service.Post(parseID(*idHex), parseID(*pendingHex))
+		err = service.PostTraced(ctx, parseID(*idHex), parseID(*pendingHex))
 	case "void":
-		err = service.Void(parseID(*idHex), parseID(*pendingHex))
+		err = service.VoidTraced(ctx, parseID(*idHex), parseID(*pendingHex))
 	default:
 		fail(fmt.Errorf("unsupported --operation %q", *operation))
 	}
