@@ -22,6 +22,11 @@ func TestRealPostgresRateExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	// Clean public schema per test — the repo integration-harness
+	// convention, so several tests can share one database (e.g. in CI).
+	if _, err := store.pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
 	for _, migrationPath := range []string{
 		filepath.Join("..", "..", "db", "migrations", "0001_financial_intents.sql"),
 		filepath.Join("..", "..", "db", "migrations", "0002_mojaloop_callbacks.sql"),

@@ -23,6 +23,7 @@ func TestRealPostgresBeneficiaryIntake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	for _, name := range []string{"0001", "0002", "0003", "0004", "0005"} {
 		matches, globErr := filepath.Glob(filepath.Join(os.Getenv("MIGRATION_PATH"), name+"_*.sql"))
 		if globErr != nil || len(matches) != 1 {

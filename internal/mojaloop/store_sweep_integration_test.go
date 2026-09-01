@@ -23,6 +23,7 @@ func TestRealPostgresCallbackOrderingAndSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	for _, migrationPath := range []string{
 		// 0007 alters both fx_rates and mojaloop_transfer_callbacks, so the
 		// full chain is required (FC-3 made the sweep migration monolithic).

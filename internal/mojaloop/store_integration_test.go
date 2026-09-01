@@ -12,6 +12,16 @@ import (
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
 )
 
+// resetPublicSchema gives each integration test a clean public schema —
+// the repo convention for the real-PostgreSQL harnesses — so several
+// integration tests can share one database (e.g. in CI).
+func resetPublicSchema(t *testing.T, ctx context.Context, store *intent.Store) {
+	t.Helper()
+	if err := store.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+}
+
 func TestRealPostgresMojaloopCallbackStore(t *testing.T) {
 	ctx := context.Background()
 	store, err := intent.Open(ctx, os.Getenv("DATABASE_URL"))
@@ -19,6 +29,7 @@ func TestRealPostgresMojaloopCallbackStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	migration, err := os.ReadFile(filepath.Clean(os.Getenv("MOJALOOP_MIGRATION_PATH")))
 	if err != nil {
 		t.Fatal(err)

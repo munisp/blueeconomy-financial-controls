@@ -20,6 +20,7 @@ func TestRealPostgresVoidAndResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	for _, migrationPath := range []string{
 		os.Getenv("MIGRATION_PATH"),
 		filepath.Join("..", "..", "db", "migrations", "0006_intent_officer_resolution.sql"),

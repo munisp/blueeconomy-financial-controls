@@ -38,3 +38,59 @@ jobs:
         run: go test -race ./...
       - name: Build all packages
         run: go build ./...
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_DB: blueeconomy_finance
+          POSTGRES_USER: blueeconomy
+          POSTGRES_PASSWORD: local-only-integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blueeconomy -d blueeconomy_finance"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://blueeconomy:local-only-integration-password@127.0.0.1:5432/blueeconomy_finance?sslmode=disable
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify module graph
+        run: go mod download
+      # Real-PostgreSQL integration evidence (//go:build integration). Each
+      # package pins its own MIGRATION_PATH convention (single target file
+      # or the db/migrations directory); every test resets the public
+      # schema, so packages run sequentially against one service container.
+      - name: Run integration tests against real PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIGRATIONS="$(pwd)/db/migrations"
+          run_pkg() {
+            local pkg="$1" migration_path="$2"
+            echo "== go test -tags integration ${pkg} (MIGRATION_PATH=${migration_path})"
+            MIGRATION_PATH="${migration_path}" \
+            MOJALOOP_MIGRATION_PATH="${MIGRATIONS}/0002_mojaloop_callbacks.sql" \
+              go test -race -tags integration -count=1 "${pkg}"
+          }
+          run_pkg ./internal/intent          "${MIGRATIONS}/0001_financial_intents.sql"
+          run_pkg ./internal/mojaloop        "${MIGRATIONS}/0001_financial_intents.sql"
+          run_pkg ./internal/cvff            "${MIGRATIONS}"
+          run_pkg ./internal/tradefinance    "${MIGRATIONS}"
+          run_pkg ./internal/tariff          "${MIGRATIONS}/0008_tariff.sql"
+          run_pkg ./internal/revenue         "${MIGRATIONS}/0009_revenue_assurance.sql"
+          run_pkg ./internal/revenueintake   "${MIGRATIONS}/0010_revenue_intake.sql"
+          run_pkg ./internal/settlementsync  "${MIGRATIONS}/0010_revenue_intake.sql"
+          run_pkg ./internal/outbox          "${MIGRATIONS}/0009_revenue_assurance.sql"
+          run_pkg ./internal/fx              "${MIGRATIONS}/0001_financial_intents.sql"
