@@ -93,4 +93,5 @@ jobs:
           run_pkg ./internal/revenueintake   "${MIGRATIONS}/0010_revenue_intake.sql"
           run_pkg ./internal/settlementsync  "${MIGRATIONS}/0010_revenue_intake.sql"
           run_pkg ./internal/outbox          "${MIGRATIONS}/0009_revenue_assurance.sql"
+          run_pkg ./internal/glexport        "${MIGRATIONS}"
           run_pkg ./internal/fx              "${MIGRATIONS}/0001_financial_intents.sql"
