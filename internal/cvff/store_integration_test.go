@@ -21,6 +21,16 @@ func rateDate() time.Time {
 // in-sequence decisions and outbox records. Requires DATABASE_URL and
 // MIGRATION_PATH (db/migrations/0003_cvff_disbursement.sql, with the prior
 // migrations applied).
+// resetPublicSchema gives each integration test a clean public schema —
+// the repo convention for the real-PostgreSQL harnesses — so several
+// integration tests can share one database (e.g. in CI).
+func resetPublicSchema(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	if err := store.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+}
+
 func TestRealPostgresCVFFFlow(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, os.Getenv("DATABASE_URL"))
@@ -28,6 +38,7 @@ func TestRealPostgresCVFFFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	for _, name := range []string{"0001", "0002", "0003", "0004", "0005"} {
 		matches, globErr := filepath.Glob(filepath.Join(os.Getenv("MIGRATION_PATH"), name+"_*.sql"))
 		if globErr != nil || len(matches) != 1 {
@@ -112,6 +123,7 @@ func TestRealPostgresProductionWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	for _, name := range []string{"0001", "0002", "0003", "0004", "0005"} {
 		matches, globErr := filepath.Glob(filepath.Join(os.Getenv("MIGRATION_PATH"), name+"_*.sql"))
 		if globErr != nil || len(matches) != 1 {

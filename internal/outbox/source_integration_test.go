@@ -45,6 +45,8 @@ func openSource(t *testing.T) (*PostgresSource, *pgxpool.Pool) {
 		filepath.Join(filepath.Dir(migrationPath), "0003_cvff_disbursement.sql"),
 		filepath.Join(filepath.Dir(migrationPath), "0008_tariff.sql"),
 		migrationPath,
+		// 0011 carries tf_outbox, which the source also drains.
+		filepath.Join(filepath.Dir(migrationPath), "0011_tradefinance.sql"),
 	} {
 		statement, err := os.ReadFile(path)
 		if err != nil {

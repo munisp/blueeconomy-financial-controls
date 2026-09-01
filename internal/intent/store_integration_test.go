@@ -10,6 +10,16 @@ import (
 	"testing"
 )
 
+// resetPublicSchema gives each integration test a clean public schema —
+// the repo convention for the real-PostgreSQL harnesses — so several
+// integration tests can share one database (e.g. in CI).
+func resetPublicSchema(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	if err := store.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
+		t.Fatalf("reset schema: %v", err)
+	}
+}
+
 func TestRealPostgresIntentFlow(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, os.Getenv("DATABASE_URL"))
@@ -17,6 +27,7 @@ func TestRealPostgresIntentFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	resetPublicSchema(t, ctx, store)
 	migration, err := os.ReadFile(filepath.Clean(os.Getenv("MIGRATION_PATH")))
 	if err != nil {
 		t.Fatal(err)
