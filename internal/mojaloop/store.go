@@ -35,7 +35,11 @@ func (store *CallbackStore) SweepReservedTimeouts(ctx context.Context, ttl time.
 		return 0, fmt.Errorf("begin reserved-timeout sweep: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT transfer_id, updated_at FROM mojaloop_transfer_callbacks WHERE transfer_state = $1 AND timed_out_at IS NULL AND updated_at < $2 ORDER BY transfer_id FOR UPDATE`, TransferReserved, cutoff)
+	// The sweep batches its work so a large backlog of stranded RESERVED
+	// callbacks cannot hold one long lock list; the worker invokes the sweep
+	// on every tick, so a backlog drains across ticks. The batch size matches
+	// the timeout_sweep index ordering.
+	rows, err := tx.Query(ctx, `SELECT transfer_id, updated_at FROM mojaloop_transfer_callbacks WHERE transfer_state = $1 AND timed_out_at IS NULL AND updated_at < $2 ORDER BY transfer_id LIMIT 500 FOR UPDATE`, TransferReserved, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("find expired reserved callbacks: %w", err)
 	}
