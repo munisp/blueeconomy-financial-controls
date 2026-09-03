@@ -12,7 +12,8 @@ trap '"${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
 container=$("${docker_prefix[@]}" ps --filter name=financial-controls-postgres -q | head -n1)
 "${docker_prefix[@]}" exec "$container" psql -p 55435 -U blueeconomy -d blueeconomy_finance -f - < db/migrations/0001_financial_intents.sql >/dev/null
 "${docker_prefix[@]}" exec "$container" psql -p 55435 -U blueeconomy -d blueeconomy_finance -f - < db/migrations/0002_mojaloop_callbacks.sql >/dev/null
+"${docker_prefix[@]}" exec "$container" psql -p 55435 -U blueeconomy -d blueeconomy_finance -f - < db/migrations/0015_mojaloop_outbound.sql >/dev/null
 DATABASE_URL='postgres://blueeconomy:local-only-integration-password@127.0.0.1:55435/blueeconomy_finance?sslmode=disable' \
 MOJALOOP_MIGRATION_PATH="$repo_root/db/migrations/0002_mojaloop_callbacks.sql" \
-go test -tags=integration ./internal/mojaloop -run TestRealPostgresMojaloopCallbackStore -count=1
-printf '%s\n' 'Mojaloop callback real PostgreSQL integration passed: reserve, exact replay, commit, terminal replay and regression rejection.'
+go test -tags=integration ./internal/mojaloop -run 'TestRealPostgresMojaloop' -count=1
+printf '%s\n' 'Mojaloop real PostgreSQL integration passed: inbound reserve/replay/commit/regression controls and the full outbound leg (payout -> quote -> signed quote callback -> transfer -> fulfilled commit), including quote-response replay, orphaned-callback and forged-fulfilment rejection.'

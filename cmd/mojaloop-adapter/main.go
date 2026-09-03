@@ -17,8 +17,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/munisp/blueeconomy-financial-controls/internal/cvffapi"
 	"github.com/munisp/blueeconomy-financial-controls/internal/intent"
 	"github.com/munisp/blueeconomy-financial-controls/internal/mojaloop"
+	"github.com/munisp/blueeconomy-financial-controls/internal/pbac"
 	"github.com/munisp/blueeconomy-financial-controls/internal/telemetry"
 )
 
@@ -34,14 +36,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// Fail-closed posture gate: the outbound quote/transfer leg is not
-	// implemented, so `full` mode is refused explicitly rather than silently
-	// running receive-only under a `full` label. See README "Mojaloop rail
-	// posture" for exactly what `full` still requires.
-	if config.Mode == mojaloop.ModeFull {
-		return errors.New("MOJALOOP_MODE=full is not supported yet: the outbound quote/transfer leg is unimplemented; run MOJALOOP_MODE=receive-only")
-	}
-	log.Printf("mojaloop-adapter: MOJALOOP_MODE=%s — inbound signed transfer callbacks only; outbound quote/transfer leg disabled; PUT %s{id} is authenticated then answered 501", config.Mode, config.CallbackQuotePathPrefix)
+	// The operating mode is explicit and mandatory (config fails closed on
+	// anything else). `receive-only` serves only the inbound signed callback
+	// surface; `full` additionally serves the outbound leg — POST /payouts
+	// (bearer/PBAC-gated) -> POST /quotes -> signed PUT /quotes/{id} callback
+	// -> POST /transfers -> signed PUT /transfers/{id} callback — and
+	// requires the payout authorization and outbound-migration coordinates.
+	log.Printf("mojaloop-adapter: MOJALOOP_MODE=%s — inbound signed callbacks at %s{id} and %s{id}", config.Mode, config.CallbackTransferPathPrefix, config.CallbackQuotePathPrefix)
 	privateKeyBytes, err := os.ReadFile(config.SigningKeyFile)
 	if err != nil {
 		return fmt.Errorf("read signing key: %w", err)
@@ -107,6 +108,37 @@ func run() error {
 		return errors.New("MOJALOOP_TLS_CERT_FILE and MOJALOOP_TLS_KEY_FILE are required")
 	}
 	callbackStore := mojaloop.NewCallbackStore(store.Pool())
+	outboundStore := mojaloop.NewOutboundStore(store.Pool())
+	var payoutAuthenticator *cvffapi.KeycloakAuthenticator
+	var payoutPolicy *pbac.Enforcer
+	if config.Mode == mojaloop.ModeFull {
+		// Full mode coordinates (fail-closed): the outbound migration, the
+		// Keycloak realm that authorizes payout callers and the PBAC policy
+		// pack. Any gap refuses the boot rather than running ungated.
+		outboundMigrationPath := os.Getenv("MOJALOOP_OUTBOUND_MIGRATION_PATH")
+		if outboundMigrationPath == "" {
+			return errors.New("MOJALOOP_OUTBOUND_MIGRATION_PATH is required in full mode")
+		}
+		outboundMigration, err := os.ReadFile(outboundMigrationPath)
+		if err != nil {
+			return fmt.Errorf("read outbound Mojaloop migration: %w", err)
+		}
+		if err := store.Exec(context.Background(), string(outboundMigration)); err != nil {
+			return fmt.Errorf("apply outbound Mojaloop migration: %w", err)
+		}
+		payoutAuthenticator, err = cvffapi.NewKeycloakAuthenticator(context.Background(), cvffapi.KeycloakConfig{
+			Issuer:   os.Getenv("MOJALOOP_PAYOUT_ISSUER"),
+			JWKSURL:  os.Getenv("MOJALOOP_PAYOUT_JWKS_URL"),
+			Audience: os.Getenv("MOJALOOP_PAYOUT_AUDIENCE"),
+		})
+		if err != nil {
+			return fmt.Errorf("payout authenticator: %w", err)
+		}
+		payoutPolicy, err = pbac.LoadEnforcer(os.Getenv("MOJALOOP_PBAC_POLICY_DIR"))
+		if err != nil {
+			return fmt.Errorf("payout policy: %w", err)
+		}
+	}
 	// FC-3: a RESERVED callback locks funds; without a timeout sweep it
 	// strands forever. The TTL is required (fail-closed) and the sweep marks
 	// expired reservations timed out with an audit event (local operational
@@ -119,11 +151,22 @@ func run() error {
 	sweepCtx, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go runReservedTimeoutSweep(sweepCtx, callbackStore, time.Duration(reservedTimeout)*time.Second)
+	outboundClient, err := mojaloop.NewClient(config, privateKey)
+	if err != nil {
+		return err
+	}
 	handler := mojaloop.CallbackHandler{Store: callbackStore, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedTransferPathPrefix: config.CallbackTransferPathPrefix}
-	quoteHandler := mojaloop.QuoteCallbackHandler{VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedQuotePathPrefix: config.CallbackQuotePathPrefix}
+	quoteHandler := mojaloop.QuoteCallbackHandler{Store: outboundStore, PayerFSP: config.Source, PayeeFSP: config.Destination, VerificationKey: verificationKey, ExpectedSource: config.Source, ExpectedDestination: config.Destination, ExpectedVerificationKeyID: config.VerificationKeyID, ExpectedQuotePathPrefix: config.CallbackQuotePathPrefix}
+	if config.Mode == mojaloop.ModeFull {
+		handler.Outbound = outboundStore
+		quoteHandler.Client = &outboundClient
+	}
 	mux := http.NewServeMux()
 	mux.Handle(config.CallbackTransferPathPrefix, handler)
 	mux.Handle(config.CallbackQuotePathPrefix, quoteHandler)
+	if config.Mode == mojaloop.ModeFull {
+		mux.Handle("/payouts", mojaloop.PayoutHandler{Store: outboundStore, Client: &outboundClient, PayerFSP: config.Source, PayeeFSP: config.Destination, Authenticator: payoutAuthenticator, Policy: payoutPolicy})
+	}
 	mux.HandleFunc("/healthz", func(response http.ResponseWriter, _ *http.Request) {
 		// The health payload reports the configured rail posture so operators
 		// can observe the receive-only mode, not just process liveness.

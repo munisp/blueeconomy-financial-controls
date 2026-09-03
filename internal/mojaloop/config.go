@@ -16,12 +16,14 @@ import (
 // adapter's posture is always explicit, never assumed.
 const (
 	// ModeReceiveOnly durably handles inbound signed transfer callbacks only;
-	// the outbound quote/transfer leg is not implemented and quote callbacks
-	// are authenticated, then answered with a truthful 501 problem document.
+	// the outbound leg stays dormant (no payout endpoint, no transfer
+	// initiation) and quote callbacks authenticate then fail closed with 404
+	// because no local quote can ever correlate.
 	ModeReceiveOnly = "receive-only"
-	// ModeFull is reserved for the outbound quote -> transfer leg. It is
-	// parsed but the adapter refuses to start with it until the outbound leg
-	// is implemented (fail-closed, never a silent no-op).
+	// ModeFull runs the complete rail: POST /payouts (bearer/PBAC-gated)
+	// initiates POST /quotes, the signed PUT /quotes/{id} callback persists
+	// the payee response and triggers POST /transfers with the ILP packet and
+	// condition, and PUT /transfers/{id} callbacks commit or abort.
 	ModeFull = "full"
 )
 
