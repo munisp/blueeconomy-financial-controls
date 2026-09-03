@@ -21,7 +21,7 @@ The adapter configuration is for the future participant runtime. It is intention
 | `MOJALOOP_CALLBACK_BASE_URL` | Yes | Approved HTTPS callback ingress base URL registered with the partner/switch. |
 | `MOJALOOP_FSPIOP_SOURCE` | Yes | Ministry-approved source participant identifier. |
 | `MOJALOOP_FSPIOP_DESTINATION` | Yes | Approved destination participant/switch identifier for the profile. |
-| `MOJALOOP_MODE` | Yes | Explicit rail posture: `receive-only` or `full`; unset or any other value fails startup. `receive-only` durably handles inbound signed transfer callbacks; authenticated `PUT /quotes/{id}` callbacks get a truthful 501 problem document. `full` is refused at startup until the outbound quote/transfer leg is implemented (see README "Mojaloop rail posture"). |
+| `MOJALOOP_MODE` | Yes | Explicit rail posture: `receive-only` or `full`; unset or any other value fails startup. `receive-only` durably handles inbound signed transfer callbacks; authenticated `PUT /quotes/{id}` callbacks fail closed (404) since no local quote can correlate. `full` runs the complete outbound leg: gated `POST /payouts` -> signed `POST /quotes` -> signed `PUT /quotes/{id}` callback (persisted, idempotent, exact-amount and ILP-condition validation) -> `POST /transfers` -> signed `PUT /transfers/{id}` callback finalizing COMMITTED only with a fulfilment satisfying the ILP condition (see README "Mojaloop rail posture"). |
 | `MOJALOOP_SIGNING_KEY_FILE` | Yes | Runtime-mounted private-key file; never committed or placed in an evidence attachment. |
 | `MOJALOOP_SIGNING_KID` | Yes | Registered key identifier used for rotation and callback trust. |
 | `MOJALOOP_SIGNATURE_ALGORITHM` | Yes | `RS256`, `RS384` or `RS512`; the selected scheme allowlist must be approved. The local example defaults to `RS256`, but it does not create a key or endpoint. |
@@ -32,12 +32,17 @@ The adapter configuration is for the future participant runtime. It is intention
 | `MOJALOOP_TLS_KEY_FILE` | Target runtime | Runtime-mounted HTTPS private key; never committed. |
 | `DATABASE_URL` | Target runtime | PostgreSQL/CNPG connection with TLS and least-privilege role. Never commit credentials. |
 | `MOJALOOP_MIGRATION_PATH` | Target runtime | Path to `db/migrations/0002_mojaloop_callbacks.sql` or the controlled migration artifact. |
+| `MOJALOOP_OUTBOUND_MIGRATION_PATH` | Full mode | Path to `db/migrations/0015_mojaloop_outbound.sql`; required in `full` mode, boot refuses without it. |
+| `MOJALOOP_PAYOUT_ISSUER` | Full mode | Keycloak realm issuer URL verifying payout caller bearer tokens. |
+| `MOJALOOP_PAYOUT_JWKS_URL` | Full mode | Keycloak realm JWK endpoint for payout bearer verification. |
+| `MOJALOOP_PAYOUT_AUDIENCE` | Full mode | Approved client matched against `aud`/`azp` of payout bearer tokens. |
+| `MOJALOOP_PBAC_POLICY_DIR` | Full mode | Embedded OPA/Rego policy pack directory authorizing `mojaloop-payout`/`initiate`; deny-by-default, boot refuses when absent or uncompilable. |
 
 The committed `config/mojaloop.env.example` contains empty external values by design. It is a configuration shape, not a deployable environment.
 
 ## Local preparation
 
-First install the repository-pinned Go toolchain and dependencies, then run `go test -race ./internal/mojaloop`, `go vet ./...`, `govulncheck ./...` and `bash scripts/verify-mojaloop-local.sh`. The real test proves signature and body binding, unsigned-request rejection, callback reserve/commit handling, exact replay, terminal replay, identity conflict and state regression rejection against PostgreSQL. It does not prove switch or participant conformance.
+First install the repository-pinned Go toolchain and dependencies, then run `go test -race ./internal/mojaloop`, `go vet ./...`, `govulncheck ./...` and `bash scripts/verify-mojaloop-local.sh`. The real test proves signature and body binding, unsigned-request rejection, callback reserve/commit handling, exact replay, terminal replay, identity conflict and state regression rejection against PostgreSQL, plus the full outbound leg against a loopback peer-FSP test double: payout initiation, signed quote-callback persistence with replay/orphan/conflict controls, transfer preparation with the payee ILP packet/condition, fulfilled commit with real SHA-256 preimage verification and forged-fulfilment rejection. It does not prove switch or participant conformance.
 
 ## Ministry target preparation
 

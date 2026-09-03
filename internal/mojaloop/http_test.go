@@ -3,7 +3,6 @@ package mojaloop
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,7 +118,7 @@ func TestQuoteCallbackHandlerRejectsUnexpectedSource(t *testing.T) {
 	}
 }
 
-func TestQuoteCallbackHandlerSignedCallbackGetsTruthful501(t *testing.T) {
+func TestQuoteCallbackHandlerFailsClosedWithoutStore(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -127,18 +126,10 @@ func TestQuoteCallbackHandlerSignedCallbackGetsTruthful501(t *testing.T) {
 	request := signedQuoteRequest(t, key, "quote-001", []byte(`{"quoteId":"quote-001"}`))
 	response := httptest.NewRecorder()
 	quoteTestHandler(&key.PublicKey).ServeHTTP(response, request)
-	if response.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusNotImplemented, response.Body)
-	}
-	if contentType := response.Header().Get("Content-Type"); contentType != "application/problem+json" {
-		t.Fatalf("501 content type = %q", contentType)
-	}
-	var problem map[string]any
-	if err := json.Unmarshal(response.Body.Bytes(), &problem); err != nil {
-		t.Fatalf("decode problem: %v", err)
-	}
-	if problem["status"] != 501.0 || problem["title"] == nil || !strings.Contains(problem["title"].(string), "receive-only") {
-		t.Fatalf("problem document is not a truthful receive-only 501: %v", problem)
+	// With no durable store the handler cannot correlate the callback with a
+	// local quote; it fails closed rather than inventing state.
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusServiceUnavailable, response.Body)
 	}
 }
 
