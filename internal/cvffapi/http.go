@@ -5,6 +5,7 @@
 package cvffapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,7 +15,9 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,6 +130,7 @@ func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scann
 	api.Handle("GET /v1/cvff/applications/{application_id}/events", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.listEvents)))
 	api.Handle("GET /v1/cvff/applications/{application_id}/documents", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.listDocuments)))
 	api.Handle("POST /v1/cvff/applications/{application_id}/documents", handler.requirePolicy("cvff.applications", "upload", http.HandlerFunc(handler.uploadDocument)))
+	api.Handle("GET /v1/cvff/applications/{application_id}/documents/{document_id}/content", handler.requirePolicy("cvff.applications", "read", http.HandlerFunc(handler.downloadDocument)))
 	handler.mux.HandleFunc("GET /healthz", handler.health)
 	handler.mux.Handle("GET /v1/cvff/reports/dual-ledger", RequireRole(authenticator, AuditorRole,
 		handler.requirePolicy("cvff.reports.dual-ledger", "read", http.HandlerFunc(handler.dualLedgerReport))))
@@ -145,7 +149,48 @@ func NewHandler(store Store, authenticator Authenticator, blobs BlobStore, scann
 }
 
 func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	handler.mux.ServeHTTP(writer, request)
+	// Baseline security headers on every response, including healthz and
+	// router-level errors.
+	header := writer.Header()
+	header.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("X-Frame-Options", "DENY")
+	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("Cache-Control", "no-store")
+	handler.mux.ServeHTTP(&problemNormalizingWriter{ResponseWriter: writer}, request)
+}
+
+// problemNormalizingWriter converts the ServeMux default text/plain 404/405
+// responses to the RFC 9457 problem+json shape every application route uses,
+// so clients see one error contract. Application responses (which always set
+// an application/* content type before WriteHeader) pass through untouched.
+type problemNormalizingWriter struct {
+	http.ResponseWriter
+	normalized bool
+}
+
+func (writer *problemNormalizingWriter) WriteHeader(status int) {
+	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+		if contentType := writer.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/") {
+			writer.normalized = true
+			title := "The requested resource was not found."
+			if status == http.StatusMethodNotAllowed {
+				title = "The method is not allowed for this resource."
+			}
+			writeProblem(writer.ResponseWriter, status, title, nil)
+			return
+		}
+	}
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *problemNormalizingWriter) Write(content []byte) (int, error) {
+	if writer.normalized {
+		// The mux default body is discarded; the problem document was
+		// already written by WriteHeader.
+		return len(content), nil
+	}
+	return writer.ResponseWriter.Write(content)
 }
 
 func (handler *Handler) health(writer http.ResponseWriter, _ *http.Request) {
@@ -374,6 +419,60 @@ func (handler *Handler) listDocuments(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusOK, result)
 }
 
+// downloadDocument streams one stored document body. Authorization is the
+// parent application's: ownedApplication fails closed with 404 for other
+// beneficiaries' applications, and an unknown document id under an owned
+// application is likewise a 404 — never a 403 ownership leak. There is no
+// DELETE by design: documents are an immutable audit trail.
+func (handler *Handler) downloadDocument(writer http.ResponseWriter, request *http.Request) {
+	application, ok := handler.ownedApplication(writer, request)
+	if !ok {
+		return
+	}
+	documentID := request.PathValue("document_id")
+	documents, err := handler.store.ListDocuments(request.Context(), application.ApplicationID)
+	if err != nil {
+		writeProblem(writer, http.StatusInternalServerError, "The document could not be loaded.", nil)
+		return
+	}
+	var document *cvff.Document
+	for index := range documents {
+		if documents[index].DocumentID == documentID {
+			document = &documents[index]
+			break
+		}
+	}
+	if document == nil {
+		writeProblem(writer, http.StatusNotFound, "The document was not found.", nil)
+		return
+	}
+	// Defence in depth: the stored metadata row must still reference the
+	// owning application's content-addressed namespace.
+	if !strings.HasPrefix(document.StorageKey, "cvff-documents/"+application.ApplicationID+"/") {
+		writeProblem(writer, http.StatusNotFound, "The document was not found.", nil)
+		return
+	}
+	object, err := handler.blobs.Get(request.Context(), document.StorageKey)
+	if err != nil {
+		if errors.Is(err, ErrObjectNotFound) {
+			writeProblem(writer, http.StatusNotFound, "The document was not found.", nil)
+			return
+		}
+		writeProblem(writer, http.StatusBadGateway, "The document content could not be read; retry later.", nil)
+		return
+	}
+	defer object.Close()
+	contentType := document.ContentType
+	if parsed, _, err := mime.ParseMediaType(contentType); err != nil || parsed == "" {
+		contentType = "application/octet-stream"
+	}
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": path.Base(strings.ReplaceAll(document.FileName, "\\", "/"))}))
+	writer.Header().Set("Content-Length", strconv.FormatInt(document.SizeBytes, 10))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(writer, object)
+}
+
 // uploadDocument stores one supporting document: ownership check, approved
 // type and quota enforcement, mandatory malware scan, content-addressed
 // object put, then the metadata row with idempotent replay.
@@ -447,6 +546,18 @@ func (handler *Handler) uploadDocument(writer http.ResponseWriter, request *http
 		writeProblem(writer, http.StatusUnprocessableEntity, "Files of this type are not accepted.", nil)
 		return
 	}
+	// The declared content type is client input and proves nothing: the
+	// bytes themselves must match it, and known-dangerous signatures are
+	// rejected regardless of what the client declared.
+	if dangerous := dangerousContentSignature(content); dangerous != "" {
+		writeProblem(writer, http.StatusUnprocessableEntity, "The file content is a "+dangerous+"; executable and script content is never accepted.", nil)
+		return
+	}
+	parsedType, _, _ := mime.ParseMediaType(partContentType)
+	if !contentMatchesDeclaredType(parsedType, content) {
+		writeProblem(writer, http.StatusUnprocessableEntity, "The file content does not match the declared type "+parsedType+".", nil)
+		return
+	}
 	documents, err := handler.store.ListDocuments(request.Context(), application.ApplicationID)
 	if err != nil {
 		writeProblem(writer, http.StatusInternalServerError, "The document quota could not be verified.", nil)
@@ -513,6 +624,56 @@ func (handler *Handler) uploadDocument(writer http.ResponseWriter, request *http
 		return
 	}
 	writeJSON(writer, http.StatusCreated, documentOf(retained))
+}
+
+// knownSignatures binds the approved content types to their mandatory magic
+// prefixes. A listed type is only accepted when the bytes carry its
+// signature.
+var knownSignatures = map[string][][]byte{
+	"application/pdf": {[]byte("%PDF-")},
+	"image/png":       {[]byte("\x89PNG\r\n\x1a\n")},
+	"image/jpeg":      {[]byte("\xFF\xD8\xFF")},
+}
+
+// dangerousPrefixes are executable and script signatures that are rejected
+// no matter which content type the client declared.
+var dangerousPrefixes = []struct {
+	name   string
+	prefix []byte
+}{
+	{"Windows executable (MZ)", []byte("MZ")},
+	{"ELF executable", []byte("\x7FELF")},
+	{"script (shebang)", []byte("#!")},
+	{"Mach-O executable (32-bit)", []byte("\xFE\xED\xFA\xCE")},
+	{"Mach-O executable (64-bit)", []byte("\xFE\xED\xFA\xCF")},
+	{"Mach-O executable (reverse 32-bit)", []byte("\xCE\xFA\xED\xFE")},
+	{"Mach-O executable (reverse 64-bit)", []byte("\xCF\xFA\xED\xFE")},
+}
+
+// dangerousContentSignature names the matched dangerous signature, or "".
+func dangerousContentSignature(content []byte) string {
+	for _, dangerous := range dangerousPrefixes {
+		if bytes.HasPrefix(content, dangerous.prefix) {
+			return dangerous.name
+		}
+	}
+	return ""
+}
+
+// contentMatchesDeclaredType verifies the magic bytes against the declared
+// type. Types without a known signature in the approved set cannot be
+// byte-verified; the dangerous-signature screen above still applies.
+func contentMatchesDeclaredType(declaredType string, content []byte) bool {
+	signatures, known := knownSignatures[declaredType]
+	if !known {
+		return true
+	}
+	for _, signature := range signatures {
+		if bytes.HasPrefix(content, signature) {
+			return true
+		}
+	}
+	return false
 }
 
 func (handler *Handler) contentTypeApproved(contentType string) bool {

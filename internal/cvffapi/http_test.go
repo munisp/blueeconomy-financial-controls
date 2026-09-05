@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -276,8 +277,20 @@ func (store *fakeStore) ListDocuments(_ context.Context, applicationID string) (
 }
 
 type fakeBlobs struct {
-	puts map[string][]byte
-	err  error
+	puts   map[string][]byte
+	err    error
+	getErr error
+}
+
+func (blobs *fakeBlobs) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	if blobs.getErr != nil {
+		return nil, blobs.getErr
+	}
+	body, ok := blobs.puts[key]
+	if !ok {
+		return nil, fmt.Errorf("%q: %w", key, ErrObjectNotFound)
+	}
+	return io.NopCloser(bytes.NewReader(body)), nil
 }
 
 func (blobs *fakeBlobs) Put(_ context.Context, key string, _ string, content io.Reader, _ int64) error {
@@ -660,11 +673,15 @@ func multipartBody(t *testing.T, documentType string, fileName string, contentTy
 	return writer.FormDataContentType(), buffer.Bytes()
 }
 
+// testPDFBytes carries a genuine PDF magic prefix: uploads are verified
+// against the declared content type, so test fixtures must sniff clean.
+var testPDFBytes = []byte("%PDF-1.7\n%cvff-test\n")
+
 func TestUploadDocumentContract(t *testing.T) {
 	store := &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}}
 	blobs := &fakeBlobs{puts: map[string][]byte{}}
 	handler := newTestHandler(t, store, blobs, fakeScanner{})
-	contentType, body := multipartBody(t, "VESSEL_REGISTRATION", "vessel-registration.pdf", "application/pdf", []byte("pdf-bytes"))
+	contentType, body := multipartBody(t, "VESSEL_REGISTRATION", "vessel-registration.pdf", "application/pdf", testPDFBytes)
 	request := httptest.NewRequest(http.MethodPost, "/v1/cvff/applications/cvff-app-001/documents", bytes.NewReader(body))
 	request.Header.Set("Authorization", testBearer)
 	request.Header.Set("Content-Type", contentType)
@@ -685,7 +702,7 @@ func TestUploadDocumentContract(t *testing.T) {
 		}
 	}
 	if document["document_type"] != "VESSEL_REGISTRATION" || document["file_name"] != "vessel-registration.pdf" ||
-		document["content_type"] != "application/pdf" || document["size_bytes"] != 9.0 {
+		document["content_type"] != "application/pdf" || document["size_bytes"] != float64(len(testPDFBytes)) {
 		t.Fatalf("document mismatch: %v", document)
 	}
 	// Bytes are stored under the content-addressed key recorded in metadata.
@@ -693,7 +710,7 @@ func TestUploadDocumentContract(t *testing.T) {
 		t.Fatalf("created docs = %d", len(store.createdDocs))
 	}
 	stored, ok := blobs.puts[store.createdDocs[0].StorageKey]
-	if !ok || string(stored) != "pdf-bytes" {
+	if !ok || !bytes.Equal(stored, testPDFBytes) {
 		t.Fatalf("object store mismatch: %v", blobs.puts)
 	}
 	if !strings.HasPrefix(store.createdDocs[0].StorageKey, "cvff-documents/cvff-app-001/") {
@@ -716,7 +733,7 @@ func TestUploadDocumentIdempotentReplay(t *testing.T) {
 		IdempotencyKey: "doc-key-001",
 		CreatedAt:      time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC),
 	}
-	content := []byte("pdf-bytes")
+	content := testPDFBytes
 	sum := sha256Of(content)
 	existing.SHA256Hex = sum
 	store := &fakeStore{
@@ -750,7 +767,7 @@ func sha256Of(content []byte) string {
 }
 
 func TestUploadDocumentFailClosedMatrix(t *testing.T) {
-	content := []byte("pdf-bytes")
+	content := testPDFBytes
 	cases := map[string]struct {
 		documentType string
 		fileName     string
@@ -767,6 +784,18 @@ func TestUploadDocumentFailClosedMatrix(t *testing.T) {
 		"scanner unavailable":      {"VESSEL_REGISTRATION", "file.pdf", "application/pdf", content, fakeScanner{err: ErrScannerUnavailable}, nil, http.StatusServiceUnavailable},
 		"object storage failure":   {"VESSEL_REGISTRATION", "file.pdf", "application/pdf", content, fakeScanner{}, errors.New("backend down"), http.StatusBadGateway},
 		"missing idempotency key":  {"VESSEL_REGISTRATION", "file.pdf", "application/pdf", content, fakeScanner{}, nil, http.StatusUnprocessableEntity},
+		"forged executable as pdf": {"VESSEL_REGISTRATION", "file.pdf", "application/pdf", []byte("MZ\x90\x00 fake exe"), fakeScanner{}, nil, http.StatusUnprocessableEntity},
+		"elf binary as png":        {"VESSEL_REGISTRATION", "file.png", "image/png", []byte("\x7FELF\x02\x01\x01"), fakeScanner{}, nil, http.StatusUnprocessableEntity},
+		"script as jpeg":           {"VESSEL_REGISTRATION", "file.jpg", "image/jpeg", []byte("#!/bin/sh\nid\n"), fakeScanner{}, nil, http.StatusUnprocessableEntity},
+		"content type mismatch":    {"VESSEL_REGISTRATION", "file.png", "image/png", content, fakeScanner{}, nil, http.StatusUnprocessableEntity},
+		"truncated pdf header":     {"VESSEL_REGISTRATION", "file.pdf", "application/pdf", []byte("%PD"), fakeScanner{}, nil, http.StatusUnprocessableEntity},
+	}
+	forgedCases := map[string]bool{
+		"forged executable as pdf": true,
+		"elf binary as png":        true,
+		"script as jpeg":           true,
+		"content type mismatch":    true,
+		"truncated pdf header":     true,
 	}
 	for name, testCase := range cases {
 		store := &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}}
@@ -786,6 +815,14 @@ func TestUploadDocumentFailClosedMatrix(t *testing.T) {
 		if len(store.createdDocs) != 0 {
 			t.Fatalf("case %s: document persisted despite rejection", name)
 		}
+		if forgedCases[name] {
+			if contentType := recorder.Header().Get("Content-Type"); contentType != "application/problem+json" {
+				t.Fatalf("case %s: rejection content type = %q", name, contentType)
+			}
+			if scanned := testCase.scanner; scanned != (fakeScanner{}) {
+				t.Fatalf("case %s: unexpected scanner state", name)
+			}
+		}
 	}
 }
 
@@ -799,7 +836,7 @@ func TestUploadDocumentQuota(t *testing.T) {
 		})
 	}
 	handler := newTestHandler(t, store, &fakeBlobs{puts: map[string][]byte{}}, fakeScanner{})
-	contentType, body := multipartBody(t, "BANK_DETAILS", "bank-details.pdf", "application/pdf", []byte("pdf-bytes"))
+	contentType, body := multipartBody(t, "BANK_DETAILS", "bank-details.pdf", "application/pdf", testPDFBytes)
 	request := httptest.NewRequest(http.MethodPost, "/v1/cvff/applications/cvff-app-001/documents", bytes.NewReader(body))
 	request.Header.Set("Authorization", testBearer)
 	request.Header.Set("Content-Type", contentType)
@@ -871,5 +908,162 @@ func TestListDocumentsShape(t *testing.T) {
 	}
 	if document["uploaded_at"] != "2026-08-21T09:00:00Z" || document["document_type"] != "CABOTAGE_LICENSE" {
 		t.Fatalf("document mismatch: %v", document)
+	}
+}
+
+// seededDownloadDocument returns one stored document plus its object bytes.
+func seededDownloadDocument() (cvff.Document, []byte) {
+	content := testPDFBytes
+	document := cvff.Document{
+		DocumentID:     "doc-001",
+		ApplicationID:  "cvff-app-001",
+		BeneficiaryID:  testSubject,
+		DocumentType:   "CABOTAGE_LICENSE",
+		FileName:       "cabotage-license.pdf",
+		ContentType:    "application/pdf",
+		SizeBytes:      int64(len(content)),
+		SHA256Hex:      sha256Of(content),
+		StorageBackend: "s3",
+		StorageKey:     "cvff-documents/cvff-app-001/" + sha256Of(content),
+		IdempotencyKey: "doc-key-001",
+		CreatedAt:      time.Date(2026, 8, 21, 9, 0, 0, 0, time.UTC),
+	}
+	return document, content
+}
+
+func TestDownloadDocumentContent(t *testing.T) {
+	document, content := seededDownloadDocument()
+	store := &fakeStore{
+		applications: []cvff.ApplicationDetail{seededApplication()},
+		documents:    []cvff.Document{document},
+	}
+	blobs := &fakeBlobs{puts: map[string][]byte{document.StorageKey: content}}
+	handler := newTestHandler(t, store, blobs, fakeScanner{})
+	request := httptest.NewRequest(http.MethodGet, "/v1/cvff/applications/cvff-app-001/documents/doc-001/content", nil)
+	request.Header.Set("Authorization", testBearer)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("download = %d: %s", recorder.Code, recorder.Body)
+	}
+	if contentType := recorder.Header().Get("Content-Type"); contentType != "application/pdf" {
+		t.Fatalf("download content type = %q", contentType)
+	}
+	disposition := recorder.Header().Get("Content-Disposition")
+	if !strings.HasPrefix(disposition, "attachment") || !strings.Contains(disposition, "cabotage-license.pdf") {
+		t.Fatalf("download disposition = %q", disposition)
+	}
+	if !bytes.Equal(recorder.Body.Bytes(), content) {
+		t.Fatalf("download body mismatch: %q", recorder.Body.Bytes())
+	}
+}
+
+func TestDownloadDocumentFailClosed(t *testing.T) {
+	document, content := seededDownloadDocument()
+	foreign := seededApplication()
+	foreign.BeneficiaryID = "kc-beneficiary-999"
+	cases := map[string]struct {
+		store   *fakeStore
+		blobs   *fakeBlobs
+		path    string
+		want    int
+		want404 bool
+	}{
+		"unknown document id": {
+			store:   &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}, documents: []cvff.Document{document}},
+			blobs:   &fakeBlobs{puts: map[string][]byte{document.StorageKey: content}},
+			path:    "/v1/cvff/applications/cvff-app-001/documents/doc-missing/content",
+			want:    http.StatusNotFound,
+			want404: true,
+		},
+		"foreign owner application": {
+			store:   &fakeStore{applications: []cvff.ApplicationDetail{foreign}, documents: []cvff.Document{document}},
+			blobs:   &fakeBlobs{puts: map[string][]byte{document.StorageKey: content}},
+			path:    "/v1/cvff/applications/cvff-app-001/documents/doc-001/content",
+			want:    http.StatusNotFound,
+			want404: true,
+		},
+		"object missing from storage": {
+			store: &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}, documents: []cvff.Document{document}},
+			blobs: &fakeBlobs{puts: map[string][]byte{}},
+			path:  "/v1/cvff/applications/cvff-app-001/documents/doc-001/content",
+			want:  http.StatusNotFound,
+		},
+		"storage backend failure": {
+			store: &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}, documents: []cvff.Document{document}},
+			blobs: &fakeBlobs{puts: map[string][]byte{}, getErr: errors.New("backend down")},
+			path:  "/v1/cvff/applications/cvff-app-001/documents/doc-001/content",
+			want:  http.StatusBadGateway,
+		},
+	}
+	for name, testCase := range cases {
+		handler := newTestHandler(t, testCase.store, testCase.blobs, fakeScanner{})
+		request := httptest.NewRequest(http.MethodGet, testCase.path, nil)
+		request.Header.Set("Authorization", testBearer)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.want {
+			t.Fatalf("case %s: download = %d, want %d (%s)", name, recorder.Code, testCase.want, recorder.Body)
+		}
+		if contentType := recorder.Header().Get("Content-Type"); contentType != "application/problem+json" {
+			t.Fatalf("case %s: error content type = %q", name, contentType)
+		}
+	}
+}
+
+func TestSecurityHeadersPresent(t *testing.T) {
+	store := &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}}
+	handler := newTestHandler(t, store, &fakeBlobs{puts: map[string][]byte{}}, fakeScanner{})
+	for _, path := range []string{"/healthz", "/v1/cvff/applications"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", testBearer)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		expected := map[string]string{
+			"Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+			"X-Content-Type-Options":    "nosniff",
+			"X-Frame-Options":           "DENY",
+			"Referrer-Policy":           "no-referrer",
+			"Cache-Control":             "no-store",
+		}
+		for header, want := range expected {
+			if got := recorder.Header().Get(header); got != want {
+				t.Fatalf("%s: header %s = %q, want %q", path, header, got, want)
+			}
+		}
+	}
+}
+
+func TestRouterErrorsAreProblemJSON(t *testing.T) {
+	store := &fakeStore{applications: []cvff.ApplicationDetail{seededApplication()}}
+	handler := newTestHandler(t, store, &fakeBlobs{puts: map[string][]byte{}}, fakeScanner{})
+	cases := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodGet, "/v1/cvff/no-such-resource", http.StatusNotFound},
+		{http.MethodGet, "/totally-unknown", http.StatusNotFound},
+		{http.MethodDelete, "/v1/cvff/applications", http.StatusMethodNotAllowed},
+		{http.MethodPatch, "/v1/cvff/applications/cvff-app-001", http.StatusMethodNotAllowed},
+	}
+	for _, testCase := range cases {
+		request := httptest.NewRequest(testCase.method, testCase.path, nil)
+		request.Header.Set("Authorization", testBearer)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != testCase.want {
+			t.Fatalf("%s %s = %d, want %d", testCase.method, testCase.path, recorder.Code, testCase.want)
+		}
+		if contentType := recorder.Header().Get("Content-Type"); contentType != "application/problem+json" {
+			t.Fatalf("%s %s content type = %q, want application/problem+json", testCase.method, testCase.path, contentType)
+		}
+		var problem map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &problem); err != nil {
+			t.Fatalf("%s %s problem body malformed: %v", testCase.method, testCase.path, err)
+		}
+		if problem["status"] != float64(testCase.want) || problem["title"] == nil {
+			t.Fatalf("%s %s problem mismatch: %v", testCase.method, testCase.path, problem)
+		}
 	}
 }

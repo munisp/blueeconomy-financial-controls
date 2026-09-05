@@ -20,9 +20,16 @@ type BlobStore interface {
 	// Put durably stores content under key, replacing nothing: keys are
 	// content-addressed so an identical put is an idempotent no-op.
 	Put(ctx context.Context, key string, contentType string, content io.Reader, sizeBytes int64) error
+	// Get streams one stored object. Absent keys fail with
+	// ErrObjectNotFound; the caller closes the returned reader.
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// Backend returns the canonical backend name recorded in metadata rows.
 	Backend() string
 }
+
+// ErrObjectNotFound marks an absent object key; callers map it to 404
+// without leaking whether the key belongs to another tenant.
+var ErrObjectNotFound = errors.New("object not found")
 
 // Environment variable names mirror blueeconomy-data-platform storage.py.
 const (
@@ -228,4 +235,24 @@ func (store *localGatedStore) Put(ctx context.Context, key string, _ string, con
 		return fmt.Errorf("sync gated object: %w", err)
 	}
 	return nil
+}
+
+// Get opens one gated object for reading; absent keys fail with
+// ErrObjectNotFound.
+func (store *localGatedStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	path, err := store.pathFor(key)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("gated object %q: %w", key, ErrObjectNotFound)
+		}
+		return nil, fmt.Errorf("open gated object: %w", err)
+	}
+	return file, nil
 }
