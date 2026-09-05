@@ -126,6 +126,39 @@ func (store *adlsStore) Put(ctx context.Context, key string, contentType string,
 	return nil
 }
 
+// Get streams one blob through the ADLS Gen2 read path. Absent blobs fail
+// with ErrObjectNotFound; the caller closes the returned body.
+func (store *adlsStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	blobURL, err := store.blobURL(key, nil)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, blobURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build ADLS read request: %w", err)
+	}
+	request.Header.Set("x-ms-date", store.now().UTC().Format(http.TimeFormat))
+	request.Header.Set("x-ms-version", "2020-10-02")
+	if err := store.sign(request, 0); err != nil {
+		return nil, err
+	}
+	response, err := store.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("ADLS read request: %w", err)
+	}
+	if response.StatusCode == http.StatusNotFound {
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return nil, fmt.Errorf("ADLS object %q: %w", key, ErrObjectNotFound)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return nil, fmt.Errorf("ADLS read returned HTTP %d", response.StatusCode)
+	}
+	return response.Body, nil
+}
+
 func (store *adlsStore) do(ctx context.Context, method string, requestURL string, body []byte, contentType string) error {
 	request, err := http.NewRequestWithContext(ctx, method, requestURL, strings.NewReader(string(body)))
 	if err != nil {

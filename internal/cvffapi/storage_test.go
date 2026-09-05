@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -85,6 +86,20 @@ func TestLocalGatedPutAndIdempotency(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("stored object mode = %o, want 0600", info.Mode().Perm())
+	}
+	// Reads round-trip the stored bytes; absent keys fail with
+	// ErrObjectNotFound.
+	reader, err := store.Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || string(got) != "pdf-bytes" {
+		t.Fatalf("get content = %q, %v", got, err)
+	}
+	if _, err := store.Get(context.Background(), "cvff-documents/cvff-app-001/absent"); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("absent key error = %v, want ErrObjectNotFound", err)
 	}
 }
 

@@ -176,6 +176,35 @@ func (store *s3Store) Put(ctx context.Context, key string, contentType string, c
 	return nil
 }
 
+// Get streams one object. Absent keys fail with ErrObjectNotFound; the
+// caller closes the returned body.
+func (store *s3Store) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	objectURL, err := store.objectURL(key)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, objectURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build S3 read request: %w", err)
+	}
+	store.signV4(request, nil)
+	response, err := store.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("get S3 object: %w", err)
+	}
+	if response.StatusCode == http.StatusNotFound {
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return nil, fmt.Errorf("S3 object %q: %w", key, ErrObjectNotFound)
+	}
+	if response.StatusCode != http.StatusOK {
+		defer response.Body.Close()
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return nil, fmt.Errorf("S3 get returned HTTP %d", response.StatusCode)
+	}
+	return response.Body, nil
+}
+
 // signV4 applies AWS Signature Version 4 with the payload hash in the
 // canonical headers; keys in this service are already content-addressed.
 func (store *s3Store) signV4(request *http.Request, payload []byte) {
