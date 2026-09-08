@@ -4,11 +4,20 @@
 # CGO, so the toolchain needs gcc and CGO must stay enabled; the runtime
 # images are distroless with glibc (base-debian12, digest-pinned), running
 # as non-root. Matches the proven blueeconomy-ferry-ticketing pattern.
-FROM golang:1.25-bookworm AS build
+# go.mod's `replace github.com/munisp/blueeconomy-contracts/gen/go =>
+# ../blueeconomy-contracts/gen/go` needs that sibling module physically
+# present one directory above /src at build time - neither this Dockerfile
+# nor .github/workflows/go-quality.yml ever checked it out, so `go mod
+# download`/`go build ./...` have never actually succeeded from a clean
+# checkout (confirmed live: this exact error, before this fix). Build
+# context must be the parent directory containing both repos as siblings
+# (e.g. `docker build -f blueeconomy-financial-controls/Dockerfile ..`).
+FROM golang:1.26-bookworm AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY blueeconomy-contracts/gen/go /blueeconomy-contracts/gen/go
+COPY blueeconomy-financial-controls/go.mod blueeconomy-financial-controls/go.sum ./
 RUN go mod download
-COPY . .
+COPY blueeconomy-financial-controls/. .
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/...
 
 # Per-command runtime targets (distroless glibc base, non-root).
@@ -36,7 +45,7 @@ ENTRYPOINT ["/financial-reconcile"]
 # image (INTENT_API_POLICY_DIR=/etc/blueeconomy/policies).
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS intent-api
 COPY --from=build /out/intent-api /intent-api
-COPY policies/ /etc/blueeconomy/policies/
+COPY blueeconomy-financial-controls/policies/ /etc/blueeconomy/policies/
 USER nonroot:nonroot
 ENTRYPOINT ["/intent-api"]
 
@@ -50,7 +59,7 @@ ENTRYPOINT ["/mojaloop-adapter"]
 # (the chart sets it to /etc/blueeconomy/policies).
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS cvff-api
 COPY --from=build /out/cvff-api /cvff-api
-COPY policies/ /etc/blueeconomy/policies/
+COPY blueeconomy-financial-controls/policies/ /etc/blueeconomy/policies/
 USER nonroot:nonroot
 ENTRYPOINT ["/cvff-api"]
 
@@ -59,7 +68,7 @@ ENTRYPOINT ["/cvff-api"]
 # operator-supplied DECLARATION_SCORER_RULES_PATH overrides.
 FROM gcr.io/distroless/base-debian12:nonroot@sha256:7f0c72cd138b442ae0deeb69c08b1acf5525439ba251a49ad93c320a061567e5 AS declaration-scorer
 COPY --from=build /out/declaration-scorer /declaration-scorer
-COPY config/declaration-scorer-rules.json /etc/declaration-scorer/rules.json
+COPY blueeconomy-financial-controls/config/declaration-scorer-rules.json /etc/declaration-scorer/rules.json
 USER nonroot:nonroot
 ENTRYPOINT ["/declaration-scorer"]
 
