@@ -302,12 +302,35 @@ func RequireReconciliation(current Application) (Application, error) {
 // retry, REJECT closes it as REJECTED. Any other state or resolution fails
 // closed; the branch is never silently abandoned and never auto-resolved.
 func ResolveReconciliation(current Application, resolution ReconciliationResolution) (Application, error) {
+	return ResolveReconciliationTo(current, resolution, StateDisbursementPending)
+}
+
+// resumableStates are the only states a reconciliation resolution may return
+// an application to: every party-decision wait state and the disbursement
+// gate. Resuming into any other state (e.g. AUDITED) is rejected fail-closed.
+var resumableStates = map[State]struct{}{
+	StateUnderwritingPrimary:   {},
+	StateUnderwritingSecondary: {},
+	StateUnderwritingTertiary:  {},
+	StateNIMASAApproval:        {},
+	StateBankConfirmation:      {},
+	StateDisbursementPending:   {},
+}
+
+// ResolveReconciliationTo is ResolveReconciliation with an explicit resume
+// target bound by the workflow when it parked: a decision-stage failure
+// (duplicate/early signal, role rejection) resumes into the interrupted stage
+// so the correct party's decision can be recorded, never silently skipped.
+func ResolveReconciliationTo(current Application, resolution ReconciliationResolution, resumeTarget State) (Application, error) {
 	if current.State != StateReconciliationRequired {
 		return Application{}, ErrSequenceViolation
 	}
 	switch resolution {
 	case ResolutionResumeDisbursement:
-		current.State = StateDisbursementPending
+		if _, ok := resumableStates[resumeTarget]; !ok {
+			return Application{}, fmt.Errorf("%w: resume target %s is not a party-decision or disbursement state", ErrResolutionInvalid, resumeTarget)
+		}
+		current.State = resumeTarget
 	case ResolutionReject:
 		current.State = StateRejected
 	default:
