@@ -14,8 +14,17 @@ import (
 )
 
 const (
-	// SignalUnderwritingDecision carries one consortium tier decision.
+	// SignalUnderwritingDecision is the legacy shared tier signal. It is
+	// retained only so in-flight senders fail loudly; the workflow never
+	// listens on it. Each tier waits on its own scoped signal (H1) so a
+	// duplicate or early decision can never leak into the next tier's wait.
 	SignalUnderwritingDecision = "cvff.underwriting-decision"
+	// SignalUnderwritingDecisionPrimary carries the PRIMARY tier decision.
+	SignalUnderwritingDecisionPrimary = "cvff.underwriting-decision.primary"
+	// SignalUnderwritingDecisionSecondary carries the SECONDARY tier decision.
+	SignalUnderwritingDecisionSecondary = "cvff.underwriting-decision.secondary"
+	// SignalUnderwritingDecisionTertiary carries the TERTIARY tier decision.
+	SignalUnderwritingDecisionTertiary = "cvff.underwriting-decision.tertiary"
 	// SignalNIMASADecision carries the NIMASA approver decision.
 	SignalNIMASADecision = "cvff.nimasa-decision"
 	// SignalBankConfirmation carries the receiving-bank confirmation.
@@ -37,6 +46,7 @@ const (
 	ActivityBeginUnderwriting     = "cvff.begin-underwriting"
 	ActivityRecordDecision        = "cvff.record-decision"
 	ActivityRecordEscalation      = "cvff.record-escalation"
+	ActivityRequireReconciliation = "cvff.require-reconciliation"
 	ActivityDisburse              = "cvff.disburse"
 	ActivityResolveReconciliation = "cvff.resolve-reconciliation"
 	ActivityCommitAudit           = "cvff.commit-audit"
@@ -80,11 +90,17 @@ type Activities struct {
 	// RecordEscalation appends an SLA-expiry audit event (fail-closed: it never
 	// advances the approval chain).
 	RecordEscalation func(ctx context.Context, applicationID string, tier cvff.UnderwritingTier, deadline time.Time) error
+	// RequireReconciliation parks a non-terminal application in the
+	// fail-closed RECONCILIATION_REQUIRED branch after a rejected decision
+	// stage (H1): the workflow then waits for the officer's resolution
+	// instead of terminating and stranding the application.
+	RequireReconciliation func(ctx context.Context, applicationID string) (cvff.State, error)
 	// Disburse posts the FX-paired disbursement ledger entries.
 	Disburse func(ctx context.Context, applicationID string) error
 	// ResolveReconciliation applies a reconciliation officer's resolution to
-	// the RECONCILIATION_REQUIRED branch and returns the resulting state.
-	ResolveReconciliation func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution) (cvff.State, error)
+	// the RECONCILIATION_REQUIRED branch and returns the resulting state;
+	// resumeTarget is the stage the workflow bound when it parked.
+	ResolveReconciliation func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution, resumeTarget cvff.State) (cvff.State, error)
 	// CommitAudit closes the lifecycle for a disbursed application.
 	CommitAudit func(ctx context.Context, applicationID string) error
 }
@@ -96,9 +112,9 @@ type underwritingStage struct {
 }
 
 var underwritingStages = []underwritingStage{
-	{cvff.TierPrimary, SignalUnderwritingDecision},
-	{cvff.TierSecondary, SignalUnderwritingDecision},
-	{cvff.TierTertiary, SignalUnderwritingDecision},
+	{cvff.TierPrimary, SignalUnderwritingDecisionPrimary},
+	{cvff.TierSecondary, SignalUnderwritingDecisionSecondary},
+	{cvff.TierTertiary, SignalUnderwritingDecisionTertiary},
 }
 
 // CVFFWorkflow binds the workflow definition to its activity dependencies.
@@ -139,32 +155,63 @@ func (workflowDef *CVFFWorkflow) CVFFDisbursementWorkflow(ctx workflow.Context, 
 		return result, fmt.Errorf("begin underwriting: %w", err)
 	}
 
-	for _, stage := range underwritingStages {
+	for stageIndex := 0; stageIndex < len(underwritingStages); {
+		stage := underwritingStages[stageIndex]
 		state, decision, escalations, err := awaitTierDecision(ctx, input.ApplicationID, stage)
+		result.Escalations += escalations
 		if err != nil {
-			result.State = state
-			return result, err
+			// A rejected decision (duplicate/early signal, wrong principal)
+			// must never terminate the rail and strand the application in
+			// UNDERWRITING_*: park in RECONCILIATION_REQUIRED and resume the
+			// interrupted tier only on the officer's resolution (H1).
+			resumed, parkErr := parkForReconciliation(ctx, input.ApplicationID, stateForTier(stage.tier))
+			if parkErr != nil {
+				result.State = state
+				return result, parkErr
+			}
+			result.State = resumed
+			if resumed == cvff.StateRejected {
+				return result, nil
+			}
+			continue
 		}
 		result.State = state
-		result.Escalations += escalations
 		history = append(history, decision)
 		if result.State == cvff.StateRejected {
 			return result, nil
 		}
+		stageIndex++
 	}
 
 	// NIMASA approval, then receiving-bank confirmation.
-	for _, signal := range []string{SignalNIMASADecision, SignalBankConfirmation} {
-		decision, err := awaitDecision(ctx, input.ApplicationID, signal)
-		if err != nil {
-			return result, err
+	for _, stage := range []struct {
+		signal string
+		state  cvff.State
+	}{
+		{SignalNIMASADecision, cvff.StateNIMASAApproval},
+		{SignalBankConfirmation, cvff.StateBankConfirmation},
+	} {
+		for {
+			decision, err := awaitDecision(ctx, input.ApplicationID, stage.signal)
+			if err != nil {
+				resumed, parkErr := parkForReconciliation(ctx, input.ApplicationID, stage.state)
+				if parkErr != nil {
+					return result, parkErr
+				}
+				result.State = resumed
+				if resumed == cvff.StateRejected {
+					return result, nil
+				}
+				continue
+			}
+			history = append(history, decision)
+			if decision.Decision == cvff.DecisionReject {
+				result.State = cvff.StateRejected
+				return result, nil
+			}
+			result.State = decision.ToState
+			break
 		}
-		history = append(history, decision)
-		if decision.Decision == cvff.DecisionReject {
-			result.State = cvff.StateRejected
-			return result, nil
-		}
-		result.State = decision.ToState
 	}
 
 	// Disbursement executes only after NIMASA and the receiving bank approved.
@@ -184,7 +231,7 @@ func (workflowDef *CVFFWorkflow) CVFFDisbursementWorkflow(ctx workflow.Context, 
 		var resolution ResolutionSignal
 		workflow.GetSignalChannel(ctx, SignalReconciliationResolution).Receive(ctx, &resolution)
 		var resolved cvff.State
-		if err := workflow.ExecuteActivity(ctx, ActivityResolveReconciliation, input.ApplicationID, resolution.PrincipalID, resolution.Resolution).Get(ctx, &resolved); err != nil {
+		if err := workflow.ExecuteActivity(ctx, ActivityResolveReconciliation, input.ApplicationID, resolution.PrincipalID, resolution.Resolution, cvff.StateDisbursementPending).Get(ctx, &resolved); err != nil {
 			return result, fmt.Errorf("resolve reconciliation: %w", err)
 		}
 		result.State = resolved
@@ -197,9 +244,22 @@ func (workflowDef *CVFFWorkflow) CVFFDisbursementWorkflow(ctx workflow.Context, 
 	}
 
 	// Beneficiary confirmation of receipt closes the disbursement.
-	beneficiary, err := awaitDecision(ctx, input.ApplicationID, SignalBeneficiaryConfirmation)
-	if err != nil {
-		return result, err
+	var beneficiary cvff.Approval
+	for {
+		decision, err := awaitDecision(ctx, input.ApplicationID, SignalBeneficiaryConfirmation)
+		if err != nil {
+			resumed, parkErr := parkForReconciliation(ctx, input.ApplicationID, cvff.StateDisbursementPending)
+			if parkErr != nil {
+				return result, parkErr
+			}
+			result.State = resumed
+			if resumed == cvff.StateRejected {
+				return result, nil
+			}
+			continue
+		}
+		beneficiary = decision
+		break
 	}
 	history = append(history, beneficiary)
 	if beneficiary.Decision == cvff.DecisionReject {
@@ -279,6 +339,42 @@ func awaitDecision(ctx workflow.Context, applicationID, signal string) (cvff.App
 		return cvff.Approval{}, fmt.Errorf("record decision on %s: %w", signal, err)
 	}
 	return cvff.Approval{ApplicationID: applicationID, PrincipalID: payload.PrincipalID, Decision: payload.Decision, ToState: state}, nil
+}
+
+// parkForReconciliation moves the application into the fail-closed
+// RECONCILIATION_REQUIRED branch and waits for the reconciliation officer's
+// resolution. RESUME_DISBURSEMENT returns the application to the bound
+// resumeTarget (the interrupted stage) so the correct party's decision can
+// be recorded; REJECT closes the chain. An undeliverable resolution never
+// abandons the branch — the workflow keeps waiting (H1).
+func parkForReconciliation(ctx workflow.Context, applicationID string, resumeTarget cvff.State) (cvff.State, error) {
+	if err := workflow.ExecuteActivity(ctx, ActivityRequireReconciliation, applicationID).Get(ctx, nil); err != nil {
+		return "", fmt.Errorf("require reconciliation: %w", err)
+	}
+	for {
+		var resolution ResolutionSignal
+		workflow.GetSignalChannel(ctx, SignalReconciliationResolution).Receive(ctx, &resolution)
+		var resolved cvff.State
+		if err := workflow.ExecuteActivity(ctx, ActivityResolveReconciliation, applicationID, resolution.PrincipalID, resolution.Resolution, resumeTarget).Get(ctx, &resolved); err != nil {
+			// Invalid or undeliverable resolutions are consumed and ignored;
+			// the parked branch is never silently abandoned.
+			continue
+		}
+		return resolved, nil
+	}
+}
+
+// stateForTier maps an underwriting tier to the lifecycle state the
+// application occupies while that tier's decision is awaited.
+func stateForTier(tier cvff.UnderwritingTier) cvff.State {
+	switch tier {
+	case cvff.TierPrimary:
+		return cvff.StateUnderwritingPrimary
+	case cvff.TierSecondary:
+		return cvff.StateUnderwritingSecondary
+	default:
+		return cvff.StateUnderwritingTertiary
+	}
 }
 
 func roleForTier(tier cvff.UnderwritingTier) cvff.Role {
