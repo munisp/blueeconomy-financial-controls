@@ -229,7 +229,7 @@ func uint64Env(name string) uint64 {
 	value := required(name)
 	parsed, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
-		log.Fatalf("cvff-worker: %s is not an unsigned integer: %v", name)
+		log.Fatalf("cvff-worker: %s is not an unsigned integer: %v", name, err)
 	}
 	return parsed
 }
