@@ -157,6 +157,7 @@ func registerActivities(cvffWorker worker.Worker, activities *workflow.Activitie
 	cvffWorker.RegisterActivityWithOptions(activities.BeginUnderwriting, activityRegisterOptions(workflow.ActivityBeginUnderwriting))
 	cvffWorker.RegisterActivityWithOptions(activities.RecordDecision, activityRegisterOptions(workflow.ActivityRecordDecision))
 	cvffWorker.RegisterActivityWithOptions(activities.RecordEscalation, activityRegisterOptions(workflow.ActivityRecordEscalation))
+	cvffWorker.RegisterActivityWithOptions(activities.RequireReconciliation, activityRegisterOptions(workflow.ActivityRequireReconciliation))
 	cvffWorker.RegisterActivityWithOptions(activities.Disburse, activityRegisterOptions(workflow.ActivityDisburse))
 	cvffWorker.RegisterActivityWithOptions(activities.ResolveReconciliation, activityRegisterOptions(workflow.ActivityResolveReconciliation))
 	cvffWorker.RegisterActivityWithOptions(activities.CommitAudit, activityRegisterOptions(workflow.ActivityCommitAudit))
@@ -228,7 +229,7 @@ func uint64Env(name string) uint64 {
 	value := required(name)
 	parsed, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
-		log.Fatalf("cvff-worker: %s is not an unsigned integer: %v", name, err)
+		log.Fatalf("cvff-worker: %s is not an unsigned integer: %v", name)
 	}
 	return parsed
 }

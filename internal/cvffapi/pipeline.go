@@ -124,8 +124,12 @@ type recordDecisionRequest struct {
 // carries its party decision.
 func decisionSignalForState(state cvff.State) (string, bool) {
 	switch state {
-	case cvff.StateUnderwritingPrimary, cvff.StateUnderwritingSecondary, cvff.StateUnderwritingTertiary:
-		return workflow.SignalUnderwritingDecision, true
+	case cvff.StateUnderwritingPrimary:
+		return workflow.SignalUnderwritingDecisionPrimary, true
+	case cvff.StateUnderwritingSecondary:
+		return workflow.SignalUnderwritingDecisionSecondary, true
+	case cvff.StateUnderwritingTertiary:
+		return workflow.SignalUnderwritingDecisionTertiary, true
 	case cvff.StateNIMASAApproval:
 		return workflow.SignalNIMASADecision, true
 	case cvff.StateBankConfirmation:
