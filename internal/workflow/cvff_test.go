@@ -78,10 +78,14 @@ func (store *stubStore) RecordEscalation(_ context.Context, applicationID string
 }
 
 func (store *stubStore) ResolveReconciliation(_ context.Context, applicationID string, _ int64, _ string, resolution cvff.ReconciliationResolution) (cvff.Application, error) {
+	return store.ResolveReconciliationTo(context.Background(), applicationID, 0, "", resolution, cvff.StateDisbursementPending)
+}
+
+func (store *stubStore) ResolveReconciliationTo(_ context.Context, applicationID string, _ int64, _ string, resolution cvff.ReconciliationResolution, resumeTarget cvff.State) (cvff.Application, error) {
 	if applicationID != store.application.ApplicationID {
 		return cvff.Application{}, cvff.ErrNotFound
 	}
-	updated, err := cvff.ResolveReconciliation(store.application, resolution)
+	updated, err := cvff.ResolveReconciliationTo(store.application, resolution, resumeTarget)
 	if err != nil {
 		return cvff.Application{}, err
 	}
@@ -131,6 +135,7 @@ func newTestEnvironment(t *testing.T) (*testsuite.TestWorkflowEnvironment, *stub
 	env.RegisterActivityWithOptions(activities.BeginUnderwriting, activity.RegisterOptions{Name: ActivityBeginUnderwriting})
 	env.RegisterActivityWithOptions(activities.RecordDecision, activity.RegisterOptions{Name: ActivityRecordDecision})
 	env.RegisterActivityWithOptions(activities.RecordEscalation, activity.RegisterOptions{Name: ActivityRecordEscalation})
+	env.RegisterActivityWithOptions(activities.RequireReconciliation, activity.RegisterOptions{Name: ActivityRequireReconciliation})
 	env.RegisterActivityWithOptions(activities.Disburse, activity.RegisterOptions{Name: ActivityDisburse})
 	env.RegisterActivityWithOptions(activities.ResolveReconciliation, activity.RegisterOptions{Name: ActivityResolveReconciliation})
 	env.RegisterActivityWithOptions(activities.CommitAudit, activity.RegisterOptions{Name: ActivityCommitAudit})
@@ -144,9 +149,9 @@ func signalAllParties(env *testsuite.TestWorkflowEnvironment, after time.Duratio
 		signal    string
 		principal string
 	}{
-		{SignalUnderwritingDecision, "kc-uw-primary"},
-		{SignalUnderwritingDecision, "kc-uw-secondary"},
-		{SignalUnderwritingDecision, "kc-uw-tertiary"},
+		{SignalUnderwritingDecisionPrimary, "kc-uw-primary"},
+		{SignalUnderwritingDecisionSecondary, "kc-uw-secondary"},
+		{SignalUnderwritingDecisionTertiary, "kc-uw-tertiary"},
 		{SignalNIMASADecision, "kc-nimasa"},
 		{SignalBankConfirmation, "kc-bank"},
 		{SignalBeneficiaryConfirmation, "kc-beneficiary"},
@@ -180,9 +185,9 @@ func TestWorkflowNIMASARejectionIsFailClosed(t *testing.T) {
 		principal string
 		decision  cvff.Decision
 	}{
-		{SignalUnderwritingDecision, "kc-uw-primary", cvff.DecisionApprove},
-		{SignalUnderwritingDecision, "kc-uw-secondary", cvff.DecisionApprove},
-		{SignalUnderwritingDecision, "kc-uw-tertiary", cvff.DecisionApprove},
+		{SignalUnderwritingDecisionPrimary, "kc-uw-primary", cvff.DecisionApprove},
+		{SignalUnderwritingDecisionSecondary, "kc-uw-secondary", cvff.DecisionApprove},
+		{SignalUnderwritingDecisionTertiary, "kc-uw-tertiary", cvff.DecisionApprove},
 		{SignalNIMASADecision, "kc-nimasa", cvff.DecisionReject},
 	}
 	for index, decision := range decisions {
@@ -201,19 +206,74 @@ func TestWorkflowNIMASARejectionIsFailClosed(t *testing.T) {
 	require.Equal(t, cvff.StateRejected, store.application.State)
 }
 
-func TestWorkflowRoleViolationFailsClosed(t *testing.T) {
-	env, _, disburser, definition := newTestEnvironment(t)
+// TestWorkflowRoleViolationParksAndRecovers is the H1 regression: a decision
+// from an unassigned principal (or a duplicate/early signal that reaches
+// RecordDecision) no longer terminates the workflow and strands the
+// application in UNDERWRITING_*. The application parks in
+// RECONCILIATION_REQUIRED; the officer's RESUME resolution re-awaits the
+// interrupted tier and the correct party's decision completes the chain.
+func TestWorkflowRoleViolationParksAndRecovers(t *testing.T) {
+	env, store, disburser, definition := newTestEnvironment(t)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(SignalUnderwritingDecision, DecisionSignal{PrincipalID: "kc-intruder", Decision: cvff.DecisionApprove})
+		env.SignalWorkflow(SignalUnderwritingDecisionPrimary, DecisionSignal{PrincipalID: "kc-intruder", Decision: cvff.DecisionApprove})
 	}, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalReconciliationResolution, ResolutionSignal{PrincipalID: "kc-recon-officer", Resolution: cvff.ResolutionResumeDisbursement})
+	}, 3*time.Minute)
+	signalAllParties(env, 5*time.Minute)
 	env.ExecuteWorkflow(definition.CVFFDisbursementWorkflow, DisbursementInput{ApplicationID: "cvff-001"})
 	require.True(t, env.IsWorkflowCompleted())
-	err := env.GetWorkflowError()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "record decision")
-	require.Contains(t, err.Error(), "cvff-control-rejection")
-	require.Contains(t, err.Error(), "retryable: false")
-	require.Equal(t, 0, disburser.calls)
+	require.NoError(t, env.GetWorkflowError())
+	var result DisbursementResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, cvff.StateAudited, result.State)
+	require.Equal(t, cvff.StateAudited, store.application.State)
+	require.Equal(t, 1, disburser.calls)
+}
+
+// TestWorkflowDecisionStageReconciliationRejectClosesChain: a rejected
+// decision stage parked in RECONCILIATION_REQUIRED closes as REJECTED on the
+// officer's REJECT resolution instead of resuming.
+func TestWorkflowDecisionStageReconciliationRejectClosesChain(t *testing.T) {
+	env, store, disburser, definition := newTestEnvironment(t)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUnderwritingDecisionSecondary, DecisionSignal{PrincipalID: "kc-intruder", Decision: cvff.DecisionApprove})
+	}, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalUnderwritingDecisionPrimary, DecisionSignal{PrincipalID: "kc-uw-primary", Decision: cvff.DecisionApprove})
+	}, 2*time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalReconciliationResolution, ResolutionSignal{PrincipalID: "kc-recon-officer", Resolution: cvff.ResolutionReject})
+	}, 4*time.Minute)
+	env.ExecuteWorkflow(definition.CVFFDisbursementWorkflow, DisbursementInput{ApplicationID: "cvff-001"})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	var result DisbursementResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, cvff.StateRejected, result.State)
+	require.Equal(t, cvff.StateRejected, store.application.State)
+	require.Equal(t, 0, disburser.calls, "rejected application must never disburse")
+}
+
+// TestWorkflowCrossTierSignalCannotLeak: a SECONDARY-tier decision signalled
+// while PRIMARY is awaited is scoped to its own channel; it is consumed only
+// when the SECONDARY tier waits, never misapplied to PRIMARY.
+func TestWorkflowCrossTierSignalCannotLeak(t *testing.T) {
+	env, store, disburser, definition := newTestEnvironment(t)
+	env.RegisterDelayedCallback(func() {
+		// Early SECONDARY decision (correct principal, wrong time): buffered
+		// on the secondary channel and applied only at the secondary stage.
+		env.SignalWorkflow(SignalUnderwritingDecisionSecondary, DecisionSignal{PrincipalID: "kc-uw-secondary", Decision: cvff.DecisionApprove})
+	}, time.Minute)
+	signalAllParties(env, 3*time.Minute)
+	env.ExecuteWorkflow(definition.CVFFDisbursementWorkflow, DisbursementInput{ApplicationID: "cvff-001"})
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	var result DisbursementResult
+	require.NoError(t, env.GetWorkflowResult(&result))
+	require.Equal(t, cvff.StateAudited, result.State)
+	require.Equal(t, cvff.StateAudited, store.application.State)
+	require.Equal(t, 1, disburser.calls)
 }
 
 func TestWorkflowSLAExpiryEscalatesAndContinues(t *testing.T) {

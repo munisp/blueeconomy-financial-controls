@@ -382,6 +382,27 @@ func (store *Store) ResolveReconciliation(ctx context.Context, applicationID str
 	}, "cvff.reconciliation_resolved", RoleReconciliationOfficer, officerPrincipal)
 }
 
+// ResolveReconciliationTo is ResolveReconciliation with an explicit resume
+// target: a workflow parked on a failed decision stage resumes into the
+// interrupted stage, never into a state that would skip a party decision.
+func (store *Store) ResolveReconciliationTo(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution ReconciliationResolution, resumeTarget State) (Application, error) {
+	if err := ValidateIdentifier("principal_id", officerPrincipal); err != nil {
+		return Application{}, err
+	}
+	assignments, err := store.RoleAssignments(ctx, applicationID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return Application{}, err
+	}
+	for role, principal := range assignments {
+		if principal == officerPrincipal {
+			return Application{}, fmt.Errorf("%w: reconciliation officer holds %s on this application", ErrRoleSeparation, role)
+		}
+	}
+	return store.transitionAs(ctx, applicationID, expectedVersion, func(current Application) (Application, error) {
+		return ResolveReconciliationTo(current, resolution, resumeTarget)
+	}, "cvff.reconciliation_resolved", RoleReconciliationOfficer, officerPrincipal)
+}
+
 // RecordEscalation appends an SLA-expiry audit event without advancing state.
 // It is fail-closed: escalation never approves or rejects on behalf of a party.
 func (store *Store) RecordEscalation(ctx context.Context, applicationID string, tier UnderwritingTier, deadline time.Time) error {

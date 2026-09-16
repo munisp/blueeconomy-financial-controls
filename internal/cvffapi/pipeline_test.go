@@ -138,7 +138,7 @@ func TestFourPartyChainAdvancesEndToEnd(t *testing.T) {
 	}
 	parties := []string{"kc-uw-primary", "kc-uw-secondary", "kc-uw-tertiary", "kc-nimasa", "kc-bank", testSubject}
 	wantSignals := []string{
-		workflow.SignalUnderwritingDecision, workflow.SignalUnderwritingDecision, workflow.SignalUnderwritingDecision,
+		workflow.SignalUnderwritingDecisionPrimary, workflow.SignalUnderwritingDecisionSecondary, workflow.SignalUnderwritingDecisionTertiary,
 		workflow.SignalNIMASADecision, workflow.SignalBankConfirmation, workflow.SignalBeneficiaryConfirmation,
 	}
 	for step, state := range states {

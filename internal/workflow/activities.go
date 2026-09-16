@@ -17,6 +17,9 @@ type ApplicationStore interface {
 	Transition(ctx context.Context, applicationID string, expectedVersion int64, move func(cvff.Application) (cvff.Application, error), eventType string) (cvff.Application, error)
 	RecordEscalation(ctx context.Context, applicationID string, tier cvff.UnderwritingTier, deadline time.Time) error
 	ResolveReconciliation(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution cvff.ReconciliationResolution) (cvff.Application, error)
+	// ResolveReconciliationTo resolves the branch with an explicit resume
+	// target bound by the workflow when it parked (H1 recovery).
+	ResolveReconciliationTo(ctx context.Context, applicationID string, expectedVersion int64, officerPrincipal string, resolution cvff.ReconciliationResolution, resumeTarget cvff.State) (cvff.Application, error)
 }
 
 // Disburser posts the FX-paired disbursement ledger entries. The production
@@ -60,6 +63,17 @@ func NewActivities(store ApplicationStore, disburser Disburser) (*Activities, er
 		RecordEscalation: func(ctx context.Context, applicationID string, tier cvff.UnderwritingTier, deadline time.Time) error {
 			return store.RecordEscalation(ctx, applicationID, tier, deadline)
 		},
+		RequireReconciliation: func(ctx context.Context, applicationID string) (cvff.State, error) {
+			current, err := store.Get(ctx, applicationID)
+			if err != nil {
+				return "", err
+			}
+			updated, err := store.Transition(ctx, applicationID, current.Version, cvff.RequireReconciliation, "cvff.reconciliation_required")
+			if err != nil {
+				return "", activityError("require reconciliation", err)
+			}
+			return updated.State, nil
+		},
 		Disburse: func(ctx context.Context, applicationID string) error {
 			if err := disburser.Disburse(ctx, applicationID); err != nil {
 				// The rail has already moved the application into the
@@ -73,12 +87,12 @@ func NewActivities(store ApplicationStore, disburser Disburser) (*Activities, er
 			}
 			return nil
 		},
-		ResolveReconciliation: func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution) (cvff.State, error) {
+		ResolveReconciliation: func(ctx context.Context, applicationID, principalID string, resolution cvff.ReconciliationResolution, resumeTarget cvff.State) (cvff.State, error) {
 			current, err := store.Get(ctx, applicationID)
 			if err != nil {
 				return "", err
 			}
-			updated, err := store.ResolveReconciliation(ctx, applicationID, current.Version, principalID, resolution)
+			updated, err := store.ResolveReconciliationTo(ctx, applicationID, current.Version, principalID, resolution, resumeTarget)
 			if err != nil {
 				return "", activityError("resolve reconciliation", err)
 			}
