@@ -56,7 +56,7 @@ func TestAllowDenyMatrix(t *testing.T) {
 		"auditor cannot decide":            {fiduciaryInput("kc-aud", []string{"auditor"}, "cvff.application", "decide"), false},
 		"underwriter decides":              {fiduciaryInput("kc-uw", []string{"underwriter"}, "cvff.application", "decide"), true},
 		"nimasa approver decides":          {fiduciaryInput("kc-ni", []string{"nimasa-approver"}, "cvff.application", "decide"), true},
-		"receiving bank decides":           {fiduciaryInput("kc-bank", []string{"receiving-bank"}, "cvff.application", "decide"), true},
+		"receiving bank decides":           {fiduciaryInput("kc-bank", []string{"receiving-bank-officer"}, "cvff.application", "decide"), true},
 		"beneficiary decides":              {fiduciaryInput("kc-ben", []string{"beneficiary"}, "cvff.application", "decide"), true},
 		"officer cannot decide":            {fiduciaryInput("kc-off", []string{"cvff-officer"}, "cvff.application", "decide"), false},
 		"officer assigns roles":            {fiduciaryInput("kc-off", []string{"cvff-officer"}, "cvff.application.roles", "assign"), false}, // assignments absent
