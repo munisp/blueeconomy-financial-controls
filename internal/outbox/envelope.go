@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -100,6 +101,22 @@ var envelopeEventTypes = map[string]string{
 	"tradefinance.application.decision_recorded": "tradefinance.application.v1",
 	"tradefinance.application.disbursed":         "tradefinance.application.v1",
 	"tradefinance.application.settled":           "tradefinance.application.v1",
+}
+
+// Topics returns the sorted, de-duplicated set of platform topics this
+// service can publish — used for the startup capability log and
+// docs/EVENTS.md.
+func Topics() []string {
+	seen := map[string]struct{}{}
+	topics := make([]string, 0, len(envelopeEventTypes))
+	for _, topic := range envelopeEventTypes {
+		if _, ok := seen[topic]; !ok {
+			seen[topic] = struct{}{}
+			topics = append(topics, topic)
+		}
+	}
+	sort.Strings(topics)
+	return topics
 }
 
 // BuildEnvelope maps one outbox event to the platform envelope. It fails

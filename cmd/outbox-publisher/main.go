@@ -70,6 +70,7 @@ func run() error {
 	}
 	source := outbox.NewPostgresSource(pool)
 
+	log.Printf("outbox-publisher: publishable topics: %s", strings.Join(outbox.Topics(), ", "))
 	log.Printf("outbox-publisher: draining to topic %s every %s (batch %d, signing kid %s)", topic, interval, batch, signer.KeyID())
 	for {
 		published, err := outbox.Drain(ctx, source, producer, signer, batch)
