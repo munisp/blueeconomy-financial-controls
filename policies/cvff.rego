@@ -26,7 +26,7 @@ role_clearance := {
 	"reconciliation-officer": "FIDUCIARY_SEGREGATED",
 	"underwriter": "FIDUCIARY_SEGREGATED",
 	"nimasa-approver": "FIDUCIARY_SEGREGATED",
-	"receiving-bank": "FIDUCIARY_SEGREGATED",
+	"receiving-bank-officer": "FIDUCIARY_SEGREGATED",
 	"intent-maker": "FIDUCIARY_SEGREGATED",
 	"intent-checker": "FIDUCIARY_SEGREGATED",
 	"financial-controller": "FIDUCIARY_SEGREGATED",
@@ -96,7 +96,7 @@ route_ok if {
 route_ok if {
 	input.resource == "cvff.application"
 	input.action == "decide"
-	has_any_role(["beneficiary", "underwriter", "nimasa-approver", "receiving-bank"])
+	has_any_role(["beneficiary", "underwriter", "nimasa-approver", "receiving-bank-officer"])
 }
 
 # Role assignment: cvff officers only, and the proposed binding must satisfy

@@ -56,7 +56,7 @@ func (pipelineAuthenticator) Authenticate(_ context.Context, authorizationHeader
 		"kc-uw-secondary":  {"underwriter"},
 		"kc-uw-tertiary":   {"underwriter"},
 		"kc-nimasa":        {"nimasa-approver"},
-		"kc-bank":          {"receiving-bank"},
+		"kc-bank":          {"receiving-bank-officer"},
 		"kc-recon-officer": {ReconciliationOfficerRole},
 		"kc-outsider":      {"beneficiary"},
 	}
